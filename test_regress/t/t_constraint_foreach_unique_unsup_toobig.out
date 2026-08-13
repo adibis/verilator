@@ -1,4 +1,4 @@
-%Warning-CONSTRAINTIGN: t/t_constraint_foreach_unique_unsup_toobig.v:11:36: Unsupported: Unique constraint on array slices of size > 100
+%Warning-CONSTRAINTIGN: t/t_constraint_foreach_unique_unsup_toobig.v:11:36: Unsupported: Unique constraint on array slice of size 101 exceeds --constraint-unique-limit of 100
                                                                           : ... note: In instance 't'
    11 |   constraint c1 {foreach (wide[i]) unique {wide[i]};}
       |                                    ^~~~~~

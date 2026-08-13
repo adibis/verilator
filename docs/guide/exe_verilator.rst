@@ -283,6 +283,18 @@ Summary:
    Defaults to 64. Setting to 0 disables all array reduction constraint
    expansion.
 
+.. option:: --constraint-unique-limit <size>
+
+   Specifies the maximum array size for which a `unique` constraint
+   (whole-array or a single array-typed slice, e.g. a foreach-indexed
+   row of a multi-dimensional array) will be expanded. Arrays or slices
+   larger than this limit will have their uniqueness constraints
+   ignored with a `CONSTRAINTIGN` warning. This prevents excessive code
+   generation for very large arrays.
+
+   Defaults to 100. Setting to 0 disables all such `unique` constraint
+   expansion.
+
 .. option:: --converge-limit <loops>
 
    Rarely needed. Specifies the maximum number of runtime iterations before

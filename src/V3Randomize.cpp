@@ -2474,10 +2474,12 @@ class ConstraintExprVisitor final : public VNVisitor {
                                     && VN_IS(rangep->rightp(), Const),
                                 nodep, "Unpack array does not have a constant range");
                     staticSize = up->elementsConst();
-                    if (staticSize > 100) {
-                        nodep->v3warn(
-                            CONSTRAINTIGN,
-                            "Unsupported: Unique constraint on static arrays of size > 100");
+                    if (static_cast<int>(staticSize) > v3Global.opt.constraintUniqueLimit()) {
+                        nodep->v3warn(CONSTRAINTIGN,
+                                      "Unsupported: Unique constraint on static arrays of size "
+                                          + cvtToStr(staticSize)
+                                          + " exceeds --constraint-unique-limit of "
+                                          + cvtToStr(v3Global.opt.constraintUniqueLimit()));
                         continue;
                     }
                     elemWidth = static_cast<uint64_t>(varp->dtypep()->width());
@@ -3559,10 +3561,12 @@ class RandomizeVisitor final : public VNVisitor {
                         uniquep->v3warn(CONSTRAINTIGN,
                                         "Unsupported: Unique constraint on other than a "
                                         "1-D array slice");
-                    } else if (up->elementsConst() > 100) {
-                        uniquep->v3warn(
-                            CONSTRAINTIGN,
-                            "Unsupported: Unique constraint on array slices of size > 100");
+                    } else if (up->elementsConst() > v3Global.opt.constraintUniqueLimit()) {
+                        uniquep->v3warn(CONSTRAINTIGN,
+                                        "Unsupported: Unique constraint on array slice of size "
+                                            + cvtToStr(up->elementsConst())
+                                            + " exceeds --constraint-unique-limit of "
+                                            + cvtToStr(v3Global.opt.constraintUniqueLimit()));
                     } else if (up->elementsConst() >= 2) {
                         const uint32_t sliceSize = up->elementsConst();
                         FileLine* const fl = uniquep->fileline();
