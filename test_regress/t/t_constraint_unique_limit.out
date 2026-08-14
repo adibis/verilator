@@ -1,0 +1,7 @@
+%Warning-CONSTRAINTIGN: t/t_constraint_unique_limit.v:13:36: Unsupported: Unique constraint on array slice of size 3 exceeds --constraint-unique-limit of 2
+                                                           : ... note: In instance 't'
+   13 |   constraint c2 {foreach (grid[i]) unique {grid[i]};}
+      |                                    ^~~~~~
+                        ... For warning description see https://verilator.org/warn/CONSTRAINTIGN?v=latest
+                        ... Use "/* verilator lint_off CONSTRAINTIGN */" and lint_on around source to disable this message.
+%Error: Exiting due to

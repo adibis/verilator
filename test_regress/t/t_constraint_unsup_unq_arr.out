@@ -1,4 +1,4 @@
-%Warning-CONSTRAINTIGN: t/t_constraint_unsup_unq_arr.v:20:5: Unsupported: Unique constraint on static arrays of size > 100
+%Warning-CONSTRAINTIGN: t/t_constraint_unsup_unq_arr.v:20:5: Unsupported: Unique constraint on static arrays of size 400 exceeds --constraint-unique-limit of 100
                                                            : ... note: In instance 't'
    20 |     unique {uniq_val_arr_400};
       |     ^~~~~~

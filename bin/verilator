@@ -413,6 +413,7 @@ detailed descriptions of these arguments.
     --compiler <compiler-name>  Tune for specified C++ compiler
     --compiler-include          Include additional header in the precompiled one
     --constraint-array-limit <size>   Maximum array size for constraint array reduction
+    --constraint-unique-limit <size>  Maximum array size for constraint unique{}
     --converge-limit <loops>    Tune convergence settle time
     --coverage                  Enable all coverage
     --coverage-expr             Enable expression coverage
