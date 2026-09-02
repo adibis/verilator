@@ -2115,16 +2115,20 @@ class ConstraintExprVisitor final : public VNVisitor {
             VL_DO_DANGLING(origp->deleteTree(), origp);
         }
     }
+    // Checks the index actually references a rand variable (not just user1,
+    // which can be over-marked in sum/with expansion contexts).
+    static bool arraySelIndexIsRand(const AstArraySel* selp) {
+        bool indexIsRand = false;
+        selp->bitp()->foreach([&](const AstNodeVarRef* vrefp) {
+            if (vrefp->varp()->rand().isRandomizable()) indexIsRand = true;
+        });
+        return indexIsRand;
+    }
     void visit(AstArraySel* nodep) override {
         if (editFormat(nodep)) return;
         FileLine* const fl = nodep->fileline();
         VNRelinker handle;
-        // Check if index actually references a rand variable (not just user1,
-        // which can be over-marked in sum/with expansion contexts)
-        bool indexIsRand = false;
-        nodep->bitp()->foreach([&](const AstNodeVarRef* vrefp) {
-            if (vrefp->varp()->rand().isRandomizable()) indexIsRand = true;
-        });
+        const bool indexIsRand = arraySelIndexIsRand(nodep);
         if (indexIsRand) {
             // Index depends on rand variable -- keep as SMT symbol.
             // Array index sort is 32-bit, so zero-extend narrower indices.
@@ -2217,6 +2221,17 @@ class ConstraintExprVisitor final : public VNVisitor {
                             "Unsupported: Nested array element access in global constraint");
                         return;
                     }
+                    if (arraySelIndexIsRand(arraySelp)) {
+                        // editSMT()'s "(select %s %s)" -> "%s.%s" name-building
+                        // special case assumes the index is a formattable
+                        // concrete value; a rand index instead resolves to the
+                        // index's own SMT sub-expression text, which corrupts
+                        // the generated identifier.
+                        nodep->v3warn(E_UNSUPPORTED,
+                                      "Unsupported: rand-dependent index into a "
+                                      "class-handle array member-selected in a constraint");
+                        return;
+                    }
                     VL_RESTORER(m_structSel);
                     m_structSel = true;
                     nodep->user1(true);
@@ -2276,6 +2291,20 @@ class ConstraintExprVisitor final : public VNVisitor {
             AstNodeDType* const arrayDtp = cmethodp->fromp()->dtypep()->skipRefp();
             AstNodeDType* const elemDtp = arrayDtp->subDTypep()->skipRefp();
             if (VN_IS(elemDtp, ClassRefDType)) {
+                bool indexIsRand = false;
+                if (cmethodp->pinsp()) {
+                    cmethodp->pinsp()->foreach([&](const AstNodeVarRef* vrefp) {
+                        if (vrefp->varp()->rand().isRandomizable()) indexIsRand = true;
+                    });
+                }
+                if (indexIsRand) {
+                    // Same corruption risk as the fixed-array ArraySel case above:
+                    // editSMT()'s name-building assumes a formattable concrete index.
+                    nodep->v3warn(E_UNSUPPORTED,
+                                  "Unsupported: rand-dependent index into a "
+                                  "class-handle array member-selected in a constraint");
+                    return;
+                }
                 VL_RESTORER(m_structSel);
                 m_structSel = true;
                 iterateChildren(nodep);

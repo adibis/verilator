@@ -1,0 +1,11 @@
+%Error-UNSUPPORTED: t/t_constraint_class_handle_array_rand_index_unsup.v:18:34: Unsupported: rand-dependent index into a class-handle array member-selected in a constraint
+   18 |   constraint c { probe == h[idx].target; }
+      |                                  ^~~~~~
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error-UNSUPPORTED: t/t_constraint_class_handle_array_rand_index_unsup.v:31:34: Unsupported: rand-dependent index into a class-handle array member-selected in a constraint
+   31 |   constraint c { probe == h[idx].scalarVal; }
+      |                                  ^~~~~~~~~
+%Error-UNSUPPORTED: t/t_constraint_class_handle_array_rand_index_unsup.v:44:34: Unsupported: rand-dependent index into a class-handle array member-selected in a constraint
+   44 |   constraint c { probe == h[idx].scalarVal; }
+      |                                  ^~~~~~~~~
+%Error: Exiting due to
