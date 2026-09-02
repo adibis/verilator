@@ -999,8 +999,28 @@ class ConstraintExprVisitor final : public VNVisitor {
         return new AstSFormatF{nodep->fileline(), (nodep->width() & 3) ? "#b%b" : "#x%x", false,
                                nodep};
     }
+    // A class handle (bare, or as an array element) has no bit-vector value to
+    // hex/binary-format: getConstFormat()'s width()-based '#x'/'#b' literal is
+    // meaningless for it and traps at runtime trying to print a VlClassRef.
+    // Only flags a resolved reference (var/select), never a call/method result --
+    // those legitimately reach here as an as-yet-unevaluated call to format, and
+    // get()-returns-handle-then-.member-selects is an existing, working path.
+    static bool dtypeIsClassHandleOrArrayThereof(const AstNodeDType* dtp) {
+        if (const AstNodeArrayDType* const arrp = VN_CAST(dtp, NodeArrayDType)) {
+            dtp = arrp->subDTypep()->skipRefp();
+        }
+        return VN_IS(dtp, ClassRefDType);
+    }
     bool editFormat(AstNodeExpr* nodep) {
         if (nodep->user1()) return false;
+        if ((VN_IS(nodep, VarRef) || VN_IS(nodep, ArraySel) || VN_IS(nodep, AssocSel)
+             || VN_IS(nodep, MemberSel))
+            && dtypeIsClassHandleOrArrayThereof(nodep->dtypep()->skipRefp())) {
+            nodep->v3warn(E_UNSUPPORTED,
+                          "Unsupported: class handle comparison in a constraint (reference "
+                          "identity isn't representable as a bit-vector constraint)");
+            return true;
+        }
         // Replace computable expression with SMT constant
         VNRelinker handle;
         nodep->unlinkFrBack(&handle);

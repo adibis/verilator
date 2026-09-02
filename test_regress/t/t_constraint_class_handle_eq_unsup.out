@@ -1,0 +1,8 @@
+%Error-UNSUPPORTED: t/t_constraint_class_handle_eq_unsup.v:16:23: Unsupported: class handle comparison in a constraint (reference identity isn't representable as a bit-vector constraint)
+   16 |   constraint c { h == t2; }
+      |                       ^~
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error-UNSUPPORTED: t/t_constraint_class_handle_eq_unsup.v:29:23: Unsupported: class handle comparison in a constraint (reference identity isn't representable as a bit-vector constraint)
+   29 |   constraint c { h == t2; }
+      |                       ^~
+%Error: Exiting due to
