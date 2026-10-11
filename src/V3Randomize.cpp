@@ -3340,7 +3340,16 @@ class ConstraintExprVisitor final : public VNVisitor {
 
                 cstmtp->add("ret = \"(" + std::string(smtOp) + " \" + ret + \" \";\n");
                 cstmtp->add("ret += ");
-                cstmtp->add(iterateSubtreeReturnEdits(perElemExprp));
+                {
+                    // A struct element sets m_conditionp to a bounds check meant
+                    // for one out-of-loop access; left alone it wraps the whole
+                    // reduction in a stale post-loop check that discards the sum.
+                    VL_RESTORER(m_conditionp);
+                    m_conditionp = nullptr;
+                    cstmtp->add(iterateSubtreeReturnEdits(perElemExprp));
+                    // Not reused (see above) -- discard rather than leak it.
+                    if (m_conditionp) VL_DO_DANGLING(m_conditionp->deleteTree(), m_conditionp);
+                }
                 cstmtp->add(";\n");
                 cstmtp->add("ret += \")\";\n");
             } else {
