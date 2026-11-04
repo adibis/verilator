@@ -2508,14 +2508,18 @@ class ConstraintExprVisitor final : public VNVisitor {
         }
         FileLine* const fl = nodep->fileline();
         AstSFormatF* newp = nullptr;
-        if (VN_AS(nodep->fromp(), SFormatF)->name() == "%s.%s") {
+        AstSFormatF* const fromSfp = VN_CAST(nodep->fromp(), SFormatF);
+        if (fromSfp && fromSfp->name() == "%s.%s") {
             newp = new AstSFormatF{fl, "%s.%s." + nodep->name(), false,
-                                   VN_AS(nodep->fromp(), SFormatF)->exprsp()->cloneTreePure(true)};
+                                   fromSfp->exprsp()->cloneTreePure(true)};
             if (newp->exprsp()->nextp()->name().rfind("#x", 0) == 0)
                 newp->exprsp()->nextp()->name("%x");  //  for #x%x to %x
+        } else if (fromSfp && !VN_IS(fromSfp->exprsp(), Cond)) {
+            newp = new AstSFormatF{fl, fromSfp->name() + "." + nodep->name(), false, nullptr};
         } else {
-            newp = new AstSFormatF{fl, nodep->fromp()->name() + "." + nodep->name(), false,
-                                   nullptr};
+            // Keep the gated base as an argument for the rand_mode hoist below.
+            newp = new AstSFormatF{fl, "%s." + nodep->name(), false,
+                                   nodep->fromp()->unlinkFrBack()};
         }
         nodep->replaceWith(newp);
         VL_DO_DANGLING(pushDeletep(nodep), nodep);
