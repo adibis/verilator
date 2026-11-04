@@ -2471,8 +2471,121 @@ class ConstraintExprVisitor final : public VNVisitor {
 
         editSMT(nodep, nodep->fromp(), lsbp, msbp);
     }
+    static int clog2Ceil(int n) { return n <= 1 ? 0 : V3Number::log2b(n - 1) + 1; }
+    // True iff an index expression references anything the solver randomizes.
+    static bool indexIsRandDependent(AstNodeExpr* bitp) {
+        bool rand = false;
+        bitp->foreach([&](const AstNodeVarRef* vrefp) {
+            if (vrefp->varp()->rand().isRandomizable() || vrefp->varp()->isStdRandomizeArg()) {
+                rand = true;
+            }
+        });
+        return rand;
+    }
+    // A rand index into a struct array cannot stay a symbolic SMT select:
+    // struct arrays are flattened to per-element solver variables, so select
+    // the element with a mux over constant indices instead. Single 1-D index
+    // only; the caller diagnoses anything wider.
+    void chainRandStructIndex(AstStructSel* nodep, AstArraySel* selp,
+                              AstUnpackArrayDType* arrDtp) {
+        FileLine* const fl = nodep->fileline();
+        AstNodeExpr* const idxp = selp->bitp();
+        const int elements = arrDtp->elementsConst();
+        // Leaf indices render through %x, zero-padded to width/4 digits, so
+        // size them to record_struct_arr's idx_width to name declared vars.
+        const int idxWidth = 1 << clog2Ceil(clog2Ceil(elements) + 1);
+        // Out-of-range idx reads the field default (IEEE 1800-2023 7.4.2).
+        AstNodeExpr* chainp = new AstConst{fl, AstConst::WidthedValue{}, nodep->width(), 0};
+        for (int k = elements - 1; k >= 0; --k) {
+            AstStructSel* const leafp = nodep->cloneTreePure(false);
+            AstArraySel* targetp = nullptr;
+            leafp->foreach([&](AstArraySel* s) {
+                if (!targetp && indexIsRandDependent(s->bitp())) targetp = s;
+            });
+            UASSERT_OBJ(targetp, nodep, "Cloned chain lost its randomized select");
+            AstNodeExpr* const oldp = targetp->bitp();
+            oldp->replaceWith(
+                new AstConst{fl, AstConst::WidthedValue{}, idxWidth, static_cast<uint32_t>(k)});
+            VL_DO_DANGLING(oldp->deleteTree(), oldp);
+            AstEq* const eqp = new AstEq{fl, idxp->cloneTreePure(false),
+                                         new AstConst{fl, AstConst::WidthedValue{}, idxp->width(),
+                                                      static_cast<uint32_t>(k)}};
+            eqp->user1(true);  // else editFormat() folds this to idxp's stale value
+            chainp = new AstCond{fl, eqp, leafp, chainp};
+            chainp->user1(true);
+        }
+        nodep->replaceWith(chainp);
+        VL_DO_DANGLING(pushDeletep(nodep), nodep);
+        iterate(chainp);
+    }
     void visit(AstStructSel* nodep) override {
         if (editFormat(nodep)) return;
+        {
+            // Collect rand-indexed selects in the member/index chain below
+            // this field access.
+            AstArraySel* randSelp = nullptr;
+            int randSels = 0;
+            AstVar* endVarp = nullptr;
+            bool blocked = false;
+            AstNodeExpr* p = nodep->fromp();
+            while (p) {
+                if (AstArraySel* const s = VN_CAST(p, ArraySel)) {
+                    if (indexIsRandDependent(s->bitp())) {
+                        ++randSels;
+                        randSelp = s;
+                    }
+                    p = s->fromp();
+                    continue;
+                }
+                if (VN_IS(p, StructSel)) {
+                    p = VN_AS(p, StructSel)->fromp();
+                    continue;
+                }
+                if (VN_IS(p, MemberSel)) {
+                    p = VN_AS(p, MemberSel)->fromp();
+                    continue;
+                }
+                if (AstVarRef* const refp = VN_CAST(p, VarRef)) {
+                    endVarp = refp->varp();
+                } else {
+                    blocked = true;
+                }
+                p = nullptr;
+            }
+            if (blocked) {
+                // Chained names don't fit queue/associative elements, so
+                // leave those shapes to today's lowering.
+                randSels = 0;
+                randSelp = nullptr;
+            }
+            const bool deep = VN_IS(nodep->fromp(), StructSel);
+            if (deep && blocked) {
+                nodep->v3warn(E_UNSUPPORTED, "Unsupported: nested struct member access "
+                                             "through a queue, dynamic, or associative array "
+                                             "element in constraint");
+                return;
+            }
+            UASSERT_OBJ(randSels == 0 || endVarp, nodep,
+                        "Chain walk ended without a root variable");
+            if (randSels > 0 && endVarp->rand().isRandomizable()) {
+                // Fixed-size indexing is the only ArraySel shape that reaches
+                // here; queues and dynamic arrays lower to CMethodHard,
+                // associative arrays to AssocSel.
+                AstUnpackArrayDType* const arrDtp
+                    = VN_AS(randSelp->fromp()->dtypep()->skipRefp(), UnpackArrayDType);
+                if (randSels == 1 && !VN_IS(arrDtp->subDTypep()->skipRefp(), NodeArrayDType)) {
+                    UASSERT_OBJ(VN_IS(arrDtp->subDTypep()->skipRefp(), StructDType), randSelp,
+                                "Non-struct element under StructSel");
+                    chainRandStructIndex(nodep, randSelp, arrDtp);
+                    return;
+                }
+                nodep->v3warn(E_UNSUPPORTED, "Unsupported: rand-dependent index into this "
+                                             "struct array shape in constraint "
+                                             "(multidimensional array, or more than one "
+                                             "randomized index)");
+                return;
+            }
+        }
         const bool outermost = !m_deferRandModeHoist;
         AstNodeExpr* const origp = outermost ? nodep->cloneTree(false) : nullptr;
         VL_RESTORER(m_structSel);
@@ -2507,15 +2620,20 @@ class ConstraintExprVisitor final : public VNVisitor {
             iterateChildren(nodep);
         }
         FileLine* const fl = nodep->fileline();
+        AstSFormatF* const fromFmtp = VN_AS(nodep->fromp(), SFormatF);
         AstSFormatF* newp = nullptr;
-        if (VN_AS(nodep->fromp(), SFormatF)->name() == "%s.%s") {
+        if (fromFmtp->name() == "%s.%s") {
             newp = new AstSFormatF{fl, "%s.%s." + nodep->name(), false,
-                                   VN_AS(nodep->fromp(), SFormatF)->exprsp()->cloneTreePure(true)};
+                                   fromFmtp->exprsp()->cloneTreePure(true)};
             if (newp->exprsp()->nextp()->name().rfind("#x", 0) == 0)
                 newp->exprsp()->nextp()->name("%x");  //  for #x%x to %x
+        } else if (fromFmtp->exprsp()) {
+            // Nested field access: keep the element-name arguments so the
+            // chained format still has a value for every specifier.
+            newp = new AstSFormatF{fl, fromFmtp->name() + "." + nodep->name(), false,
+                                   fromFmtp->exprsp()->cloneTreePure(true)};
         } else {
-            newp = new AstSFormatF{fl, nodep->fromp()->name() + "." + nodep->name(), false,
-                                   nullptr};
+            newp = new AstSFormatF{fl, fromFmtp->name() + "." + nodep->name(), false, nullptr};
         }
         nodep->replaceWith(newp);
         VL_DO_DANGLING(pushDeletep(nodep), nodep);
@@ -2626,12 +2744,7 @@ class ConstraintExprVisitor final : public VNVisitor {
         // which can be over-marked in sum/with expansion contexts). A
         // std::randomize() with-clause argument carries no rand qualifier of
         // its own but is still part of the solve.
-        bool indexIsRand = false;
-        nodep->bitp()->foreach([&](const AstNodeVarRef* vrefp) {
-            if (vrefp->varp()->rand().isRandomizable() || vrefp->varp()->isStdRandomizeArg()) {
-                indexIsRand = true;
-            }
-        });
+        const bool indexIsRand = indexIsRandDependent(nodep->bitp());
         if (m_nestedAccessp) {
             AstNodeExpr* const bitp = nodep->bitp()->cloneTreePure(false);
             AstNodeExpr* const bitFormatp

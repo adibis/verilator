@@ -1,0 +1,17 @@
+%Error-UNSUPPORTED: t/t_constraint_struct_array_rand_index_unsup.v:26:30: Unsupported: rand-dependent index into this struct array shape in constraint (multidimensional array, or more than one randomized index)
+   26 |   constraint c { arr[idx][2].tag == 4'h5; }
+      |                              ^~~
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error-UNSUPPORTED: t/t_constraint_struct_array_rand_index_unsup.v:34:32: Unsupported: rand-dependent index into this struct array shape in constraint (multidimensional array, or more than one randomized index)
+   34 |   constraint c { arr[i].sub[j].tag == 4'h5; }
+      |                                ^~~
+%Error-UNSUPPORTED: t/t_constraint_struct_array_rand_index_unsup.v:40:29: Unsupported: nested struct member access through a queue, dynamic, or associative array element in constraint
+   40 |   constraint c { q[1].inner.tag == 4'h6; }
+      |                             ^~~
+%Error-UNSUPPORTED: t/t_constraint_struct_array_rand_index_unsup.v:48:31: Unsupported: nested struct member access through a queue, dynamic, or associative array element in constraint
+   48 |   constraint c { q[idx].inner.tag == 4'h5; }
+      |                               ^~~
+%Error-UNSUPPORTED: t/t_constraint_struct_array_rand_index_unsup.v:54:29: Unsupported: nested struct member access through a queue, dynamic, or associative array element in constraint
+   54 |   constraint c { a[1].inner.tag == 4'h6; }
+      |                             ^~~
+%Error: Exiting due to
