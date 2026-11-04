@@ -2830,12 +2830,11 @@ class ConstraintExprVisitor final : public VNVisitor {
             AstNodeDType* const arrayDtp = cmethodp->fromp()->dtypep()->skipRefp();
             AstNodeDType* const elemDtp = arrayDtp->subDTypep()->skipRefp();
             if (VN_IS(elemDtp, ClassRefDType)) {
+                UASSERT_OBJ(cmethodp->pinsp(), cmethodp, "ARRAY_AT without an index pin");
                 bool indexIsRand = false;
-                if (cmethodp->pinsp()) {
-                    cmethodp->pinsp()->foreach([&](const AstNodeVarRef* vrefp) {
-                        if (vrefp->varp()->rand().isRandomizable()) indexIsRand = true;
-                    });
-                }
+                cmethodp->pinsp()->foreach([&](const AstNodeVarRef* vrefp) {
+                    if (vrefp->varp()->rand().isRandomizable()) indexIsRand = true;
+                });
                 if (indexIsRand) {
                     // Same corruption risk as the fixed-array ArraySel case above:
                     // editSMT()'s name-building assumes a formattable concrete index.
