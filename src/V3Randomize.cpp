@@ -1312,7 +1312,7 @@ class ConstraintExprVisitor final : public VNVisitor {
     bool editFormat(AstNodeExpr* nodep) {
         if (nodep->user1()) return false;
         if ((VN_IS(nodep, VarRef) || VN_IS(nodep, ArraySel) || VN_IS(nodep, AssocSel)
-             || VN_IS(nodep, MemberSel))
+             || VN_IS(nodep, MemberSel))  // LCOV_EXCL_BR_LINE - llvm-cov misattributes this arm
             && dtypeIsClassHandleOrArrayThereof(nodep->dtypep()->skipRefp())) {
             nodep->v3warn(E_UNSUPPORTED,
                           "Unsupported: class handle comparison in a constraint (reference "

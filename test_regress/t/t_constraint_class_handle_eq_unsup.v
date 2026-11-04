@@ -36,15 +36,20 @@ class C2;
 endclass
 
 // Same shape, but the class-handle operand is reached through a member
-// select (holder.h) instead of directly -- confirms the diagnostic also
-// covers a MemberSel-typed operand, not just VarRef/ArraySel.
+// select whose base is a function call (get_holder2().h), not a plain
+// variable -- a plain-variable member select gets rewritten to a VarRef
+// before reaching this diagnostic, so this is the shape that actually
+// exercises its MemberSel-typed-operand check.
 class Holder;
   rand Item h;
 endclass
 class C3;
   rand Holder holder1;
   Holder holder2;
-  constraint c { holder1.h == holder2.h; }
+  function Holder get_holder2();
+    return holder2;
+  endfunction
+  constraint c { holder1.h == get_holder2().h; }
   function new();
     holder1 = new;
     holder1.h = new;
