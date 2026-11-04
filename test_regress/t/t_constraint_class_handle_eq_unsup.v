@@ -35,13 +35,34 @@ class C2;
   endfunction
 endclass
 
+// Same shape, but the class-handle operand is reached through a member
+// select (holder.h) instead of directly -- confirms the diagnostic also
+// covers a MemberSel-typed operand, not just VarRef/ArraySel.
+class Holder;
+  rand Item h;
+endclass
+class C3;
+  rand Holder holder1;
+  Holder holder2;
+  constraint c { holder1.h == holder2.h; }
+  function new();
+    holder1 = new;
+    holder1.h = new;
+    holder2 = new;
+    holder2.h = new;
+  endfunction
+endclass
+
 module t;
   initial begin
     C1 obj1;
     C2 obj2;
+    C3 obj3;
     obj1 = new;
     obj2 = new;
+    obj3 = new;
     if (obj1.randomize() == 0) $stop;
     if (obj2.randomize() == 0) $stop;
+    if (obj3.randomize() == 0) $stop;
   end
 endmodule
