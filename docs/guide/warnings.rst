@@ -490,19 +490,25 @@ List Of Warnings
 
 .. option:: COMBDLY
 
-   .. TODO better example
-
-   Warns that there is a delayed assignment inside of a combinatorial
-   block. Using delayed assignments in this way is considered bad form, and
-   may lead to the simulator not matching synthesis. If this message is
-   suppressed, Verilator, like synthesis, will convert this to a
-   non-delayed assignment, which may result in logic races or other
-   nasties. See
+   Error issued when a non-blocking assignment `<=`, or a non-blocking event
+   trigger `->>`, is used in a combinational logic block. Using non-blocking
+   assignments in this way is bad practice, and may lead to the simulation not
+   matching synthesis. Verilator, like synthesis, will always convert these to
+   the blocking forms `=` and `->` and execute them as such. This may result in
+   race conditions and differ from other simulators.
    `http://www.sunburst-design.com/papers/CummingsSNUG2000SJ_NBA.pdf
    <http://www.sunburst-design.com/papers/CummingsSNUG2000SJ_NBA.pdf>`_
 
-   Ignoring this warning may make Verilator simulations differ from other
-   simulators.
+   This error can be disabled. Disabling it does not change execution, only
+   suppresses the error message.
+
+   Faulty example:
+
+   .. include:: ../../docs/gen/ex_COMBDLY_faulty.rst
+
+   Results in:
+
+   .. include:: ../../docs/gen/ex_COMBDLY_msg.rst
 
 
 .. option:: CONSTRAINTIGN
@@ -591,6 +597,10 @@ List Of Warnings
    Warns that Verilator does not support certain forms of
    ``covergroup``, ``coverpoint``, and coverage options, and the
    construct was ignored.
+
+   This includes crosses whose normal-bin Cartesian product exceeds
+   ``2**32 - 1`` tuples.  The limit is checked during Verilation for both
+   automatic and explicit cross bins.
 
    Disabling the :option:`UNSUPPORTED` error also disables this warning.
 
@@ -885,11 +895,12 @@ List Of Warnings
 
 .. option:: FINALDLY
 
-   Error issued when a non-blocking assignment `<=` is used in a
-   `final` block.
+   Error issued when a non-blocking assignment `<=`, or a non-blocking event
+   trigger `->>`, is used in a `final` block. Verilator will always convert
+   these to the blocking forms `=` and `->` and execute them as such.
 
-   This error can be disabled. If disabled, the assignment will be
-   executed as a `=` blocking assignment.
+   This error can be disabled. Disabling it does not change execution, only
+   suppresses the error message.
 
    Faulty example:
 
@@ -898,6 +909,7 @@ List Of Warnings
    Results in:
 
    .. include:: ../../docs/gen/ex_FINALDLY_msg.rst
+
 
 .. option:: FSMMULTI
 
@@ -1433,13 +1445,10 @@ List Of Warnings
 
    Warns that the specified signal has multiple procedural drivers.
 
-   One case is when the signal comes from multiple ``always`` blocks,
-   each with different clocking. This warning does not look at individual
-   bits (see the example below).
-
-   This is considered bad style, as the consumer of a given signal may be
-   unaware of the inconsistent clocking, causing clock domain crossing
-   or timing bugs.
+   One case is when a variable written in an ``always_comb`` or
+   ``always_ff`` block is also written by another process. IEEE 1800
+   requires variables written in these specialized always blocks to be
+   written only by that process.
 
    Faulty example:
 
@@ -1449,12 +1458,7 @@ List Of Warnings
 
    .. include:: ../../docs/gen/ex_MULTIDRIVEN_msg.rst
 
-   Another case is when a variable written in an ``always_comb`` or
-   ``always_ff`` block is also written by another process. IEEE 1800
-   requires variables written in these specialized always blocks to be
-   written only by that process.
-
-   Faulty ``always_ff`` example:
+   An initialization in an ``initial`` block is another process too:
 
    .. include:: ../../docs/gen/ex_MULTIDRIVEN_alwaysff_faulty.rst
 
@@ -1470,11 +1474,10 @@ List Of Warnings
       end
 
    A further case is when a signal named as a clocking block ``output`` is
-   also driven by a continuous assignment, or is named as an ``output`` of a
-   second clocking block. The clocking block drives the signal, so the design
-   and the testbench contend for it and the synchronous drive may be silently
-   lost. Declare the clocking block ``input`` if the intent is only to
-   observe the signal.
+   also driven by a continuous assignment. The clocking block drives the
+   signal, so the design and the testbench contend for it and the
+   synchronous drive may be silently lost. Declare the clocking block
+   ``input`` if the intent is only to observe the signal.
 
    Ignoring this warning may hide clock domain crossing, timing, or
    portability bugs. It may also cause longer simulation runtimes due to
@@ -2478,6 +2481,20 @@ List Of Warnings
    correctly.
 
 
+.. option:: UNOPTPUBLIC
+
+   Warns that a signal or task/function marked
+   :option:`/*verilator&32;public*/`, a module marked
+   :option:`/*verilator&32;public_module*/`, or :vlopt:`--public` prevents
+   optimization, which can significantly slow down the model.
+
+   For signals consider using `/*verilator&32;public_flat_rw*/` instead.
+   For functions and tasks, use DPI exports instead.
+
+   Ignoring this warning will only slow simulations; it will simulate
+   correctly.
+
+
 .. option:: UNOPTTHREADS
 
    .. TODO better example
@@ -2499,14 +2516,10 @@ List Of Warnings
 
 .. option:: UNPACKED
 
-   Warns that unpacked structs and unions are not supported because
-   :vlopt:`--structs-packed` was used, or by up through version 5.004.
+   Historical, never issued since version 5.004.
 
-   Ignoring this warning will make Verilator treat the structure as packed,
-   which may make Verilator simulations differ from other simulators. This
-   downgrading may also result in what would typically be a legal unpacked
-   struct/array inside an unpacked struct/array becoming an illegal
-   unpacked struct/array inside a packed struct/array.
+   Warned that unpacked structs and unions were not supported, or disabled
+   by the since-removed `--structs-packed` option.
 
 
 .. option:: UNSATCONSTR
@@ -2619,6 +2632,29 @@ List Of Warnings
    name, or put the appropriate lint_off around the wire. Having unused
    signals in one place makes it easy to find what is unused and reduces
    the number of lint_off pragmas, reducing bugs.
+
+
+.. option:: USEBEFOREDECL
+
+   Error that a parameter or localparam is referenced before its
+   declaration. IEEE 1800-2023 6.20.1 lets a parameter refer only to
+   earlier parameters, and some other tools reject such code.
+
+   Faulty example:
+
+   .. code-block:: sv
+      :linenos:
+      :emphasize-lines: 2
+
+      module dut;
+        initial $display(N);  //<--- Error
+        localparam int N = 8;
+      endmodule
+
+   To fix, move the declaration before the reference.
+
+   Ignoring this error will only suppress the lint check; it will simulate
+   correctly.
 
 
 .. option:: USERERROR
@@ -2736,8 +2772,8 @@ List Of Warnings
    fit the required size.
 
    Disabling/enabling WIDTH is equivalent to disabling/enabling the
-   :option:`WIDTHEXPAND`, :option:`WIDTHTRUNC`, and :option:`WIDTHXZEXPAND`
-   warnings.
+   :option:`WIDTHDIGITS`, :option:`WIDTHEXPAND`, :option:`WIDTHTRUNC`,
+   and :option:`WIDTHXZEXPAND` warnings.
 
    Ignoring these warnings will only suppress the lint check; it will
    simulate correctly.
@@ -2792,6 +2828,18 @@ List Of Warnings
    The correct fix is to either size the 1 (``32'h1``), add the
    width to the parameter definition (``parameter [31:0]``), or add the
    width to the parameter usage (``{PAR[31:0], PAR[31:0]}``).
+
+.. option:: WIDTHDIGITS
+
+   Warns when a literal contains more digits than its declared width.
+   The excess high-order digits are truncated, which can change the
+   value of the literal. For example:
+
+   .. include:: ../../docs/gen/ex_WIDTHDIGITS_faulty.rst
+
+   Results in a :option:`WIDTHDIGITS` warning:
+
+   .. include:: ../../docs/gen/ex_WIDTHDIGITS_msg.rst
 
 
 .. option:: WIDTHEXPAND

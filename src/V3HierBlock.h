@@ -40,10 +40,12 @@ class AstVar;
 class V3HierGraph final : public V3Graph {
 public:
     V3HierGraph() = default;
-    ~V3HierGraph() = default;
+    ~V3HierGraph() override = default;
     VL_UNCOPYABLE(V3HierGraph);
     VL_UNMOVABLE(V3HierGraph);
 
+    // Explicit HDL inputs followed by the library-discovered top module file, if any.
+    static VStringList sourceFiles(const string& topModuleFile = "") VL_MT_DISABLED;
     // Write command line arguments to .f files for child Verilation run
     void writeCommandArgsFiles(bool forMkJson) const VL_MT_DISABLED;
     void writeParametersFiles() const VL_MT_DISABLED;
@@ -83,6 +85,9 @@ public:
 
     const AstModule* modp() const { return m_modp; }
 
+    // Whether a string parameter value can be passed to a hierarchical block's Verilation
+    static bool stringParamPassable(const string& value) VL_PURE;
+
     // For emitting Makefile and build definition JSON
     VStringList commandArgs(bool forMkJson) const VL_MT_DISABLED;
     VStringList hierBlockArgs() const VL_MT_DISABLED;
@@ -92,7 +97,6 @@ public:
     string hierWrapperFilename(bool withDir) const VL_MT_DISABLED;
     string hierMkFilename(bool withDir) const VL_MT_DISABLED;
     string hierLibFilename(bool withDir) const VL_MT_DISABLED;
-    string hierGeneratedFilenames(bool withDir) const VL_MT_DISABLED;
     // Returns the original HDL file if it is not included in v3Global.opt.vFiles().
     string vFileIfNecessary() const VL_MT_DISABLED;
     // Write command line arguments to .f file for this hierarchical block

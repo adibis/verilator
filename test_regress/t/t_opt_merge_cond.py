@@ -11,14 +11,14 @@ import vltest_bootstrap
 
 test.scenarios('vlt_all')
 
-test.compile(verilator_flags2=["-unroll-count 64", "--stats"])
+test.compile(verilator_flags2=["-unroll-count 64", "--stats", "-fno-decompose"])
 
 test.execute()
 
 if test.vlt:
     # Note, with vltmt this might be split differently, so only checking vlt
-    test.file_grep(test.stats, r'Optimizations, MergeCond merges\s+(\d+)', 11)
-    test.file_grep(test.stats, r'Optimizations, MergeCond merged items\s+(\d+)', 585)
+    test.file_grep(test.stats, r'Optimizations, MergeCond merges\s+(\d+)', 12)
+    test.file_grep(test.stats, r'Optimizations, MergeCond merged items\s+(\d+)', 590)
     test.file_grep(test.stats, r'Optimizations, MergeCond longest merge\s+(\d+)', 129)
 
 test.passes()
