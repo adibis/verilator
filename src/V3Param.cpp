@@ -2725,6 +2725,114 @@ public:
 };
 
 //######################################################################
+// Substitute bare inherited parameters used as pins
+
+class ParamInheritedPinVisitor final : public VNVisitor {
+    AstClass* m_classp = nullptr;
+    std::set<std::string> m_resolvingDefaults;
+
+    static AstPin* extendsPinp(AstPin* paramsp, const AstNode* paramDeclp) {
+        for (AstPin* pinp = paramsp; pinp; pinp = VN_AS(pinp->nextp(), Pin)) {
+            if (pinp->modPTypep() == paramDeclp || pinp->modVarp() == paramDeclp) return pinp;
+        }
+        return nullptr;
+    }
+    static AstNode* extendsPinBindingp(AstClassRefDType* crp, const AstNode* paramDeclp) {
+        if (!crp->paramsp()) return nullptr;
+        AstPin* const pinp = extendsPinp(crp->paramsp(), paramDeclp);
+        if (!pinp) return nullptr;
+        return pinp->exprp();
+    }
+    AstNode* typeParamDefaultp(AstClassRefDType* crp, AstParamTypeDType* ptp) {
+        AstRequireDType* const reqp = VN_AS(ptp->getChildDTypep(), RequireDType);
+        if (AstRefDType* const refp = VN_CAST(reqp->subDTypep(), RefDType)) {
+            if (AstParamTypeDType* const srcp = VN_CAST(refp->refDTypep(), ParamTypeDType)) {
+                if (AstNode* const boundp = extendsPinBindingp(crp, srcp)) return boundp;
+                if (!m_resolvingDefaults.insert(srcp->name()).second) return nullptr;
+                AstNode* const defltp = typeParamDefaultp(crp, srcp);
+                m_resolvingDefaults.erase(srcp->name());
+                return defltp;
+            }
+        }
+        return reqp->lhsp();
+    }
+    AstNode* resolveInheritedMemberp(const AstClass* classp, const string& name,
+                                     AstClassRefDType*& crpOutp /*ref*/) {
+        for (AstClassExtends* cextp = classp->extendsp(); cextp;
+             cextp = VN_AS(cextp->nextp(), ClassExtends)) {
+            AstClassRefDType* const crp = VN_CAST(cextp->childDTypep(), ClassRefDType);
+            if (!crp) continue;
+            AstClass* const basep = crp->classp();
+            UASSERT_OBJ(basep, cextp, "Extended class is unresolved");
+            for (AstNode* const stmtp : basep->memberspList()) {
+                if (stmtp->name() == name) {
+                    crpOutp = crp;
+                    return stmtp;
+                }
+            }
+            if (AstNode* const foundp = resolveInheritedMemberp(basep, name, crpOutp)) {
+                return foundp;
+            }
+        }
+        return nullptr;
+    }
+    AstNode* resolveInheritedMemberp(const AstClass* classp, const string& name) {
+        AstClassRefDType* crp = nullptr;
+        return resolveInheritedMemberp(classp, name, crp);
+    }
+    AstNode* inheritedParamBindingp(const AstClass* classp, const string& name) {
+        AstClassRefDType* crp = nullptr;
+        AstNode* const memberp = resolveInheritedMemberp(classp, name, crp);
+        if (!memberp) return nullptr;
+        if (AstParamTypeDType* const ptp = VN_CAST(memberp, ParamTypeDType)) {
+            if (AstNode* const boundp = extendsPinBindingp(crp, ptp)) return boundp;
+            return typeParamDefaultp(crp, ptp);
+        }
+        if (AstVar* const varp = VN_CAST(memberp, Var)) {
+            if (!varp->isParam()) return nullptr;
+            if (AstNode* const boundp = extendsPinBindingp(crp, varp)) return boundp;
+            return varp->valuep();
+        }
+        return nullptr;
+    }
+
+    void visit(AstNode* nodep) override { iterateChildren(nodep); }
+    void visit(AstClass* nodep) override {
+        VL_RESTORER(m_classp);
+        m_classp = nodep;
+        iterateChildren(nodep);
+    }
+    void visit(AstPin* nodep) override {
+        if (m_classp) {
+            if (AstParseRef* const refp = VN_CAST(nodep->exprp(), ParseRef)) {
+                AstNode* boundp = inheritedParamBindingp(m_classp, refp->name());
+                bool ownBoundp = false;
+                if (AstRefDType* const refDTypep = VN_CAST(boundp, RefDType)) {
+                    AstParamTypeDType* const srcp
+                        = VN_CAST(refDTypep->refDTypep(), ParamTypeDType);
+                    if (srcp && resolveInheritedMemberp(m_classp, srcp->name()) == srcp) {
+                        boundp = new AstParseRef{refp->fileline(), srcp->name()};
+                        ownBoundp = true;
+                    }
+                }
+                if (boundp) {
+                    AstNode* const newp = ownBoundp ? boundp : boundp->cloneTree(false);
+                    refp->unlinkFrBack();
+                    nodep->exprp(newp);
+                    VL_DO_DANGLING(pushDeletep(refp), refp);
+                    iterate(nodep);
+                    return;
+                }
+            }
+        }
+        iterateChildren(nodep);
+    }
+
+public:
+    explicit ParamInheritedPinVisitor(AstNetlist* netlistp) { iterate(netlistp); }
+};
+
+//######################################################################
 // Process parameter top state
 
 class ParamState final {
@@ -3961,6 +4069,7 @@ void V3Param::param(AstNetlist* rootp) {
     rootp->clearDeferredParamVarps();  // Defensive: drop any stragglers from a prior invocation
 
     if (dumpTreeEitherLevel() >= 9) V3LinkDotIfaceCapture::dumpEntries("before V3Param");
+    { ParamInheritedPinVisitor{rootp}; }
     { ParamTop{rootp}; }
     // The memo is only good while parameterizing, and the tree moves after.
     rootp->clearContainingModules();
