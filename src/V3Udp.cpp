@@ -80,13 +80,25 @@ class UdpVisitor final : public VNVisitor {
         iterateChildren(nodep);
     }
     void visit(AstUdpTable* nodep) override {
+        // The grammar accepts 'table' in any module, as it shares rules with primitives
+        if (!m_primp) {
+            nodep->v3error("UDP table used outside primitive (IEEE 1800-2023 29.3)");
+            VL_DO_DANGLING(pushDeletep(nodep->unlinkFrBack()), nodep);
+            return;
+        }
+        if (m_outputVars.empty()) {
+            m_primp->v3error("No output port for UDP table, there must be one output port"
+                             " (IEEE 1800-2023 29.3)");
+            VL_DO_DANGLING(pushDeletep(nodep->unlinkFrBack()), nodep);
+            return;
+        }
         FileLine* const fl = nodep->fileline();
         if (m_outputVars.size() != 1) {
             m_outputVars.back()->v3error(
                 m_outputVars.size()
                 << " output ports for UDP table, there must be one output port");
         }
-        if (!m_isFirstOutput && m_outputVars.size()) {
+        if (!m_isFirstOutput) {
             m_inputVars[0]->v3error("First UDP port must be the output port");
         }
         m_oFieldVarp = m_outputVars[0];
@@ -139,17 +151,15 @@ class UdpVisitor final : public VNVisitor {
                 } else if (valName == "x" || valName == "X") {
                     // No x inputs supported yet, so this whole table line
                     // can never match. Drop the whole thing.
-                    if (edgetrigp) pushDeletep(edgetrigp);
-                    if (logandp) pushDeletep(logandp);
+                    if (edgetrigp) VL_DO_DANGLING(pushDeletep(edgetrigp), edgetrigp);
+                    if (logandp) VL_DO_DANGLING(pushDeletep(logandp), logandp);
                     return;
                 }
             }
             iNodep = iNodep->nextp();
         }
 
-        uint32_t inputvars = 0;
-        for (const AstNode* icountp = nodep->iFieldsp(); icountp; icountp = icountp->nextp())
-            ++inputvars;
+        const size_t inputvars = nodep->iFieldspList().size();
         if (inputvars != m_inputVars.size()) {
             nodep->v3error("Incorrect number of input values, expected " << m_inputVars.size()
                                                                          << ", got " << inputvars);
@@ -157,8 +167,8 @@ class UdpVisitor final : public VNVisitor {
 
         string const oValName = nodep->udpIsCombo() ? oNodep->name() : oNodep->nextp()->name();
         if (oValName == "-") {
-            if (edgetrigp) pushDeletep(edgetrigp);
-            if (logandp) pushDeletep(logandp);
+            if (edgetrigp) VL_DO_DANGLING(pushDeletep(edgetrigp), edgetrigp);
+            if (logandp) VL_DO_DANGLING(pushDeletep(logandp), logandp);
             return;
         }
 
@@ -173,23 +183,24 @@ class UdpVisitor final : public VNVisitor {
             } else if (oNodep->name() == "x" || oNodep->name() == "X") {
                 // No x inputs supported yet, so this whole table line
                 // can never match. Drop the whole thing.
-                if (edgetrigp) pushDeletep(edgetrigp);
-                if (logandp) pushDeletep(logandp);
+                if (edgetrigp) VL_DO_DANGLING(pushDeletep(edgetrigp), edgetrigp);
+                if (logandp) VL_DO_DANGLING(pushDeletep(logandp), logandp);
                 return;
             }
         }
 
         fl->warnOff(V3ErrorCode::LATCH, true);
-        AstIf* const ifp
-            = new AstIf{fl, logandp,
-                        new AstAssign{fl, new AstVarRef{fl, m_oFieldVarp, VAccess::WRITE},
-                                      new AstConst{fl, getOutputNum(nodep, oValName)}}};
+        // Edge-triggered lines are clocked logic, so update like a flop:
+        // other clocked logic reading the output sees the pre-edge value, regardless of ordering
+        AstNodeStmt* const assignp
+            = newOutputAssign(fl, getOutputNum(nodep, oValName), edgetrigp != nullptr);
+        AstIf* const ifp = new AstIf{fl, logandp, assignp};
         if (nodep->udpIsCombo()) {
             if (!isCombOutputSig(oValName)) {
                 oNodep->v3error("Illegal value for combinational UDP line output");
             }
             m_alwaysBlockp->addStmtsp(ifp);
-            if (edgetrigp) pushDeletep(edgetrigp);
+            if (edgetrigp) VL_DO_DANGLING(pushDeletep(edgetrigp), edgetrigp);
             return;
         }
         if (!isSequentOutputSig(oValName)) {
@@ -232,6 +243,12 @@ class UdpVisitor final : public VNVisitor {
     static bool isSequentOutputSig(const std::string& valName) {
         return (valName == "0" || valName == "1" || valName == "x" || valName == "X"
                 || valName == "-");
+    }
+    AstNodeStmt* newOutputAssign(FileLine* fl, const V3Number& outNum, bool isDelayed) const {
+        AstVarRef* const lhsp = new AstVarRef{fl, m_oFieldVarp, VAccess::WRITE};
+        AstConst* const rhsp = new AstConst{fl, outNum};
+        if (isDelayed) return new AstAssignDly{fl, lhsp, rhsp};
+        return new AstAssign{fl, lhsp, rhsp};
     }
     static V3Number getOutputNum(AstNode* nodep, const std::string& fieldNames) {
         V3Number outputNum{nodep, 1};

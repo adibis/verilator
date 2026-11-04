@@ -27,7 +27,7 @@ class V3ParseGrammar final {
 public:
     AstVar* m_varAttrp = nullptr;  // Current variable for attribute adding
     AstRange* m_gateRangep = nullptr;  // Current range for gate declarations
-    AstNode* m_scopedSigAttr = nullptr;  // Pointer to default signal attribute
+    AstNode* m_scopedSigAttrp = nullptr;  // Pointer to default signal attribute
     AstCase* m_caseAttrp = nullptr;  // Current case statement for attribute adding
     AstNodeDType* m_varDTypep = nullptr;  // Pointer to data type for next signal declaration
     AstNodeDType* m_memDTypep = nullptr;  // Pointer to data type for next member declaration
@@ -40,6 +40,7 @@ public:
     VVarType m_varDecl = VVarType::UNKNOWN;  // Type for next signal declaration (reg/wire/etc)
     VDirection m_varIO = VDirection::NONE;  // Direction for next signal declaration (reg/wire/etc)
     VLifetime m_varLifetime;  // Static/Automatic for next signal
+    // Kind of Verilator control file variable spec
     V3Control::VarSpecKind m_vltVarSpecKind = V3Control::VarSpecKind::VAR;
     bool m_impliedDecl = false;  // Allow implied wire declarations
     bool m_varDeclTyped = false;  // Var got reg/wire for dedup check
@@ -73,10 +74,10 @@ public:
     bool allTracingOn(const FileLine* fl) const {
         return v3Global.opt.trace() && m_tracingParse && fl->tracingOn();
     }
-    AstRange* scrubRange(AstNodeRange* rangep) VL_MT_DISABLED;
-    AstRange* scrubRangeMulti(AstNodeRange* rangep) VL_MT_DISABLED;
+    AstRange* scrubRange(AstNodeRange* nrangep) VL_MT_DISABLED;
+    AstRange* scrubRangeMulti(AstNodeRange* nrangep) VL_MT_DISABLED;
     AstNodePreSel* scrubSel(AstNodeExpr* fromp, AstNodePreSel* selp) VL_MT_DISABLED;
-    AstNodeDType* createArray(AstNodeDType* basep, AstNodeRange* rangep,
+    AstNodeDType* createArray(AstNodeDType* basep, AstNodeRange* nrangep,
                               bool isPacked) VL_MT_DISABLED;
     AstVar* createVariable(FileLine* fileline, const string& name, AstNodeRange* arrayp,
                            AstNode* attrsp) VL_MT_DISABLED;
@@ -111,10 +112,43 @@ public:
         }
         return exprp;
     }
+    static AstNodeExpr* createConcat(AstNodeExpr* itemsp) {
+        AstNodeExpr* concatp = itemsp;
+        AstNodeExpr* nextp = VN_AS(itemsp->nextp(), NodeExpr);
+        if (nextp) nextp->unlinkFrBackWithNext();
+        while (nextp) {
+            AstNodeExpr* const itemp = nextp;
+            nextp = VN_AS(itemp->nextp(), NodeExpr);
+            if (nextp) nextp->unlinkFrBackWithNext();
+            concatp = new AstConcat{itemp->fileline(), concatp, itemp};
+        }
+        return new AstReplicate{concatp->fileline(), concatp, 1};
+    }
     AstDisplay* createDisplayError(FileLine* fileline) {
         AstDisplay* nodep = new AstDisplay{fileline, VDisplayType::DT_ERROR, "", nullptr, nullptr};
         AstNode::addNext<AstNode, AstNode>(nodep, new AstStop{fileline, false});
         return nodep;
+    }
+    // Apply the array marker of a bins declaration of values: '[]' creates a bin per value, and
+    // '[N]' N bins holding the values (IEEE 1800-2023 19.5.1)
+    static AstCoverBin* coverBinArray(AstCoverBin* binp, AstNodeExpr* sizep) {
+        if (!sizep) return binp;
+        binp->isArray(true);
+        if (VN_IS(sizep, Unbounded)) {
+            VL_DO_DANGLING(sizep->deleteTree(), sizep);
+        } else {
+            binp->arraySizep(sizep);
+        }
+        return binp;
+    }
+    // The array marker of another bins declaration, which supports only '[]'; true if present
+    static bool coverBinArrayUnsized(AstNodeExpr* sizep) {
+        if (!sizep) return false;
+        if (!VN_IS(sizep, Unbounded)) {
+            sizep->v3warn(COVERIGN, "Unsupported: 'bins' explicit array size (treated as '[]')");
+        }
+        VL_DO_DANGLING(sizep->deleteTree(), sizep);
+        return true;
     }
     AstNodeExpr* createGatePin(AstNodeExpr* exprp) {
         AstRange* const rangep = m_gateRangep;
@@ -239,11 +273,11 @@ public:
     }
 
     void setScopedSigAttr(AstNode* attrsp) {
-        if (m_scopedSigAttr) {  // clearing set attribute
-            UASSERT_OBJ(!m_scopedSigAttr->backp(), m_scopedSigAttr, "Should not link directly");
-            VL_DO_DANGLING(m_scopedSigAttr->deleteTree(), m_scopedSigAttr);
+        if (m_scopedSigAttrp) {  // clearing set attribute
+            UASSERT_OBJ(!m_scopedSigAttrp->backp(), m_scopedSigAttrp, "Should not link directly");
+            VL_DO_DANGLING(m_scopedSigAttrp->deleteTree(), m_scopedSigAttrp);
         }
-        m_scopedSigAttr = attrsp;
+        m_scopedSigAttrp = attrsp;
     }
 
     void createScopedSigAttr(VAttrType vattrT) {
@@ -251,7 +285,7 @@ public:
     }
 
     AstNode* cloneScopedSigAttr() const {
-        return m_scopedSigAttr ? m_scopedSigAttr->cloneTree(true) : nullptr;
+        return m_scopedSigAttrp ? m_scopedSigAttrp->cloneTree(true) : nullptr;
     }
 
     void createGenericIface(AstNode* const nodep, AstNodeRange* const rangep,

@@ -41,7 +41,7 @@ class EmitVBaseVisitorConst VL_NOT_FINAL : public VNVisitorConst {
     bool m_prefixed = true;  // Whether constants need to be prefixed
     std::deque<AstNodeArrayDType*> m_packedps;  // Packed arrays to print with BasicDType
     std::unordered_map<AstJumpBlock*, size_t> m_labelNumbers;  // Label numbers for JumpBlocks
-
+    AstClass* m_activeClassp = nullptr;  // Current active class
     // METHODS
     virtual void puts(const string& str) = 0;
     virtual void putbs(const string& str) = 0;
@@ -57,6 +57,19 @@ class EmitVBaseVisitorConst VL_NOT_FINAL : public VNVisitorConst {
         putsNoTracking("\"");
     }
 
+    // 'const int x[2]' nests the ConstDType inside the array dtype, and V3Width sets
+    // AstVar::isConst only when it is outermost
+    static bool isConstDecl(const AstVar* varp) {
+        if (varp->isConst()) return true;
+        for (const AstNodeDType* dtp = varp->subDTypep(); dtp;) {
+            if (VN_IS(dtp, ConstDType)) return true;
+            const AstNodeDType* const subp = dtp->subDTypep();
+            // Prevent possible infinite loop
+            if (subp == dtp) break;
+            dtp = subp;
+        }
+        return false;
+    }
     void iterateAndCommaConstNull(AstNode* nodep) {
         for (; nodep; nodep = nodep->nextp()) {
             iterateConst(nodep);
@@ -84,16 +97,109 @@ class EmitVBaseVisitorConst VL_NOT_FINAL : public VNVisitorConst {
             if (nodep->nextp()) puts(separator);
         }
     }
-
+    void emitDType(AstNodeDType* dtp) {
+        VL_RESTORER(m_arrayPost);
+        m_arrayPost = false;
+        iterateConst(dtp);
+        m_arrayPost = true;
+        iterateConst(dtp);
+    }
+    void emitInitValue(AstNode* valuep, const AstNodeDType* declDTypep) {
+        VL_RESTORER(m_arrayPost);
+        m_arrayPost = false;  // expression context: dtype visitors must print
+        const AstNodeDType* const dtp = declDTypep->skipRefToEnumOrNullp();
+        const AstConst* const constp = VN_CAST(valuep, Const);
+        if (constp) {
+            if (const AstEnumDType* const enump = VN_CAST(dtp, EnumDType)) {
+                for (const AstEnumItem* itemp = enump->itemsp(); itemp;
+                     itemp = VN_AS(itemp->nextp(), EnumItem)) {
+                    const AstConst* const ivalp = VN_CAST(itemp->valuep(), Const);
+                    if (ivalp && ivalp->num().isCaseEq(constp->num())) {
+                        puts(itemp->prettyName());
+                        return;
+                    }
+                }
+            }
+        }
+        iterateConst(valuep);
+    }
+    void emitDpiImport(AstNodeFTask* nodep) {
+        // 'import' must be in the same puts() call as 'function'/'task': V3OutFormatter
+        // suppresses the block indent only while it sees both in one string
+        string decl = "import \"DPI-C\" ";
+        if (nodep->dpiPure()) {
+            decl += "pure ";
+        } else if (nodep->dpiContext()) {
+            decl += "context ";
+        }
+        if (nodep->cname() != nodep->prettyName()) decl += nodep->cname() + " = ";
+        decl += nodep->dpiTask() ? "task " : "function ";
+        puts(decl);
+        if (!nodep->dpiTask()) {
+            if (AstVar* const fvp = VN_CAST(nodep->fvarp(), Var)) {
+                iterateConstNull(fvp->subDTypep());
+                puts(" ");
+            } else {
+                puts("void ");
+            }
+        }
+        puts(nodep->prettyName());
+        puts("(");
+        bool first = true;
+        for (AstNode* itemp = nodep->stmtsp(); itemp; itemp = itemp->nextp()) {
+            AstVar* const portp = VN_AS(itemp, Var);
+            UASSERT_OBJ(portp->isIO(), portp, "Non-port in a DPI import prototype");
+            if (!first) puts(", ");
+            first = false;
+            puts(portp->verilogKwd());
+            puts(" ");
+            {
+                VL_RESTORER(m_arrayPost);
+                m_arrayPost = false;
+                iterateConstNull(portp->subDTypep());  // type before the name
+                puts(" ");
+                puts(portp->prettyName());
+                m_arrayPost = true;
+                iterateConstNull(portp->subDTypep());  // "[$]", "[]", "[string]", "[4]"
+            }  // m_arrayPost restored: the default is an ordinary expression
+            if (portp->valuep()) {
+                puts(" = ");
+                emitInitValue(portp->valuep(), portp->subDTypep());
+            }
+        }
+        puts(");\n");
+    }
+    void emitDpiExport(AstNodeFTask* nodep) {
+        puts("export \"DPI-C\" " + nodep->verilogKwd() + " ");
+        putqs(nodep, nodep->prettyName() + ";\n");
+    }
     // VISITORS
     void visit(AstNetlist* nodep) override { iterateAndNextConstNull(nodep->modulesp()); }
     void visit(AstNodeModule* nodep) override {
-        putfs(nodep, nodep->verilogKwd() + " " + EmitCUtil::prefixNameProtect(nodep) + ";\n");
+        putfs(nodep, nodep->verilogKwd() + " ");
+        puts(nodep->prettyName());
+        puts(";\n");
+        iterateChildrenConst(nodep);
+        putqs(nodep, "end" + nodep->verilogKwd() + "\n");
+    }
+    void visit(AstPackage* nodep) override {
+        if (nodep->isDollarUnit()) {
+            iterateChildrenConst(nodep);
+            return;
+        }
+        putfs(nodep, nodep->verilogKwd() + " ");
+        puts(nodep->prettyName());
+        puts(";\n");
         iterateChildrenConst(nodep);
         putqs(nodep, "end" + nodep->verilogKwd() + "\n");
     }
     void visit(AstPort* nodep) override {}
     void visit(AstNodeFTask* nodep) override {
+        if (nodep->dpiImport()) {
+            emitDpiImport(nodep);
+            return;
+        }
+        if (nodep->dpiExport()) emitDpiExport(nodep);
         putfs(nodep, nodep->verilogKwd());
         puts(" ");
         puts(nodep->prettyName());
@@ -255,7 +361,7 @@ class EmitVBaseVisitorConst VL_NOT_FINAL : public VNVisitorConst {
     void visit(AstSenTree* nodep) override {
         // AstSenItem is called for dumping in isolation by V3Order
         putfs(nodep, "@(");
-        for (AstNode* expp = nodep->sensesp(); expp; expp = expp->nextp()) {
+        for (AstNode* const expp : nodep->sensespList()) {
             iterateConst(expp);
             if (expp->nextp()) putqs(expp->nextp(), " or ");
         }
@@ -328,38 +434,48 @@ class EmitVBaseVisitorConst VL_NOT_FINAL : public VNVisitorConst {
         }
         puts(";\n");
     }
+    // An option or type_option assignment, from a covergroup, coverpoint, or cross
+    void emitCoverageOption(AstNode* nodep, bool typeOption, VCoverOptionType optType,
+                            AstNodeExpr* valuep) {
+        putfs(nodep,
+              std::string{typeOption ? "type_option." : "option."} + optType.ascii() + " = ");
+        iterateConst(valuep);
+        puts(";\n");
+    }
+    void visit(AstCgOptionAssign* nodep) override {
+        emitCoverageOption(nodep, nodep->typeOption(), nodep->optType(), nodep->valuep());
+    }
+    void visit(AstCoverOption* nodep) override {
+        emitCoverageOption(nodep, nodep->typeOption(), nodep->optType(), nodep->valuep());
+    }
     void visit(AstCoverBin* nodep) override {
-        switch (nodep->binsType()) {
-        case VCoverBinsType::BINS_IGNORE: putfs(nodep, "ignore_bins "); break;
-        case VCoverBinsType::BINS_ILLEGAL: putfs(nodep, "illegal_bins "); break;
-        default: putfs(nodep, "bins "); break;
-        }
+        putfs(nodep, std::string{nodep->isWildcard() ? "wildcard " : ""}
+                         + nodep->binsType().verilogKwd() + " ");
         puts(nodep->name());
+        if (nodep->isArray()) {
+            puts("[");
+            if (nodep->arraySizep()) iterateConst(nodep->arraySizep());
+            puts("]");
+        }
         if (nodep->binsType() == VCoverBinsType::BINS_DEFAULT) {
             puts(" = default");
         } else if (nodep->transp()) {
             puts(" = ");
-            for (AstNode* setp = nodep->transp(); setp; setp = setp->nextp()) {
+            for (AstNode* const setp : nodep->transpList()) {
                 if (setp != nodep->transp()) puts(", ");
                 iterateConst(setp);
             }
+        } else if (nodep->isSetExpr() || VN_IS(nodep->rangesp(), CoverWith)) {
+            puts(" = ");
+            iterateConst(nodep->rangesp());
         } else if (nodep->rangesp()) {  // LCOV_EXCL_BR_LINE - false: CoverBin always has
                                         // transp/rangesp/default
             puts(" = {");
-            for (AstNode* rangep = nodep->rangesp(); rangep; rangep = rangep->nextp()) {
+            for (AstNode* const rangep : nodep->rangespList()) {
                 if (rangep != nodep->rangesp()) puts(", ");
                 iterateConst(rangep);
             }
             puts("}");
-        }
-        puts(";\n");
-    }
-    void visit(AstCoverpointRef* nodep) override { putfs(nodep, nodep->name()); }
-    void visit(AstCoverCross* nodep) override {
-        putfs(nodep, nodep->name() + ": cross ");
-        for (AstNode* itemp = nodep->itemsp(); itemp; itemp = itemp->nextp()) {
-            if (itemp != nodep->itemsp()) puts(", ");
-            iterateConst(itemp);
         }
         if (nodep->iffp()) {
             puts(" iff (");
@@ -368,9 +484,84 @@ class EmitVBaseVisitorConst VL_NOT_FINAL : public VNVisitorConst {
         }
         puts(";\n");
     }
+    void visit(AstCoverWith* nodep) override {
+        const bool rangeList = !VN_IS(nodep->subp(), CoverpointRef);
+        if (rangeList) putfs(nodep, "{");
+        iterateAndCommaConstNull(nodep->subp());
+        if (rangeList) puts("}");
+        puts(" with (");
+        iterateConst(nodep->filterp());
+        puts(")");
+    }
+    void visit(AstCoverBinsof* nodep) override {
+        putfs(nodep, nodep->isNegated() ? "!binsof(" : "binsof(");
+        iterateConst(nodep->pointp());
+        if (!nodep->name().empty()) puts("." + nodep->name());
+        puts(")");
+        if (nodep->rangesp()) {
+            puts(" intersect {");
+            iterateAndCommaConstNull(nodep->rangesp());
+            puts("}");
+        }
+    }
+    void visit(AstCoverCrossBin* nodep) override {
+        putfs(nodep, nodep->verilogKwd() + " " + nodep->name() + " = ");
+        iterateConstNull(nodep->selectp());
+        if (nodep->iffp()) {
+            puts(" iff (");
+            iterateConst(nodep->iffp());
+            puts(")");
+        }
+        puts(";\n");
+    }
+    void visit(AstCoverCrossRef* nodep) override { putfs(nodep, nodep->name()); }
+    void visit(AstCoverCrossSelect* nodep) override {
+        putfs(nodep, "(");
+        iterateConstNull(nodep->lhsp());
+        putbs(" " + nodep->verilogKwd() + " ");
+        iterateConstNull(nodep->rhsp());
+        puts(")");
+    }
+    void visit(AstCoverCrossWith* nodep) override {
+        // A selection with a count is filtered further only in parentheses
+        if (nodep->countp()) putfs(nodep, "(");
+        iterateConstNull(nodep->selectp());
+        putfs(nodep, " with (");
+        iterateConst(nodep->filterp());
+        puts(")");
+        if (nodep->countp()) {
+            puts(" matches ");
+            iterateConst(nodep->countp());
+            puts(")");
+        }
+    }
+    void visit(AstCoverpointRef* nodep) override {
+        putfs(nodep, nodep->name());
+        iterateConstNull(nodep->exprp());
+    }
+    void visit(AstCoverCross* nodep) override {
+        putfs(nodep, nodep->name() + ": cross ");
+        for (AstNode* const itemp : nodep->itemspList()) {
+            if (itemp != nodep->itemsp()) puts(", ");
+            iterateConst(itemp);
+        }
+        if (nodep->iffp()) {
+            puts(" iff (");
+            iterateConst(nodep->iffp());
+            puts(")");
+        }
+        if (nodep->binsp() || nodep->optionsp()) {
+            puts(" {\n");
+            iterateAndNextConstNull(nodep->optionsp());
+            iterateAndNextConstNull(nodep->binsp());
+            puts("}\n");
+        } else {
+            puts(";\n");
+        }
+    }
     void visit(AstCoverTransSet* nodep) override {
         puts("(");
-        for (AstNode* itemp = nodep->itemsp(); itemp; itemp = itemp->nextp()) {
+        for (AstNode* const itemp : nodep->itemspList()) {
             if (itemp != nodep->itemsp()) puts(" => ");
             iterateConst(itemp);
         }
@@ -794,16 +985,14 @@ class EmitVBaseVisitorConst VL_NOT_FINAL : public VNVisitorConst {
         }
         puts(")");
     }
-    void visit(AstInitArray* nodep) override {
+    void visit(AstConsArray* nodep) override {
         putfs(nodep, "'{");
-        int comma = 0;
-        const auto& mapr = nodep->map();
-        for (const auto& itr : mapr) {
-            if (comma++) putbs(", ");
-            puts(cvtToStr(itr.first));
+        for (const AstConsArrayItem* itemp = nodep->itemsp(); itemp;
+             itemp = VN_AS(itemp->nextp(), ConsArrayItem)) {
+            if (itemp != nodep->itemsp()) putbs(", ");
+            puts(cvtToStr(itemp->index()));
             puts(":");
-            AstNode* const valuep = itr.second->valuep();
-            iterateConst(valuep);
+            iterateConst(itemp->valuep());
         }
         puts("}");
     }
@@ -841,6 +1030,29 @@ class EmitVBaseVisitorConst VL_NOT_FINAL : public VNVisitorConst {
         emitVerilogFormat(nodep, nodep->emitVerilog(), nodep->seedp());
     }
     void visit(AstSel* nodep) override {
+        const bool svSelectable = VN_IS(nodep->fromp(), VarRef) || VN_IS(nodep->fromp(), VarXRef)
+                                  || VN_IS(nodep->fromp(), MemberSel)
+                                  || VN_IS(nodep->fromp(), StructSel)
+                                  || VN_IS(nodep->fromp(), ArraySel) || VN_IS(nodep->fromp(), Sel);
+        if (!svSelectable) {
+            // No source syntax for selecting out of an expression; emit the
+            // value-equivalent truncation instead
+            // Force $unsigned, as to conform with IEEE 1800-2023 11.8.1
+            puts("$unsigned(" + cvtToStr(nodep->widthConst()) + "'(");
+            const AstConst* const lsbp = VN_CAST(nodep->lsbp(), Const);
+            if (lsbp && lsbp->toSInt() == 0) {
+                iterateAndNextConstNull(nodep->fromp());
+            } else {
+                puts("(");
+                iterateAndNextConstNull(nodep->fromp());
+                puts(") >> (");
+                iterateAndNextConstNull(nodep->lsbp());
+                puts(")");
+            }
+            puts("))");
+            return;
+        }
+
         iterateAndNextConstNull(nodep->fromp());
         int offset = 0;
         AstNodeDType* const dtypep = nodep->fromp()->dtypep();
@@ -875,10 +1087,13 @@ class EmitVBaseVisitorConst VL_NOT_FINAL : public VNVisitorConst {
     }
     void visit(AstThisRef* /*nodep*/) override { puts("this"); }
     void visit(AstTypedef* nodep) override {
+        VL_RESTORER(m_arrayPost);
         putfs(nodep, "typedef ");
+        m_arrayPost = false;
         iterateConstNull(nodep->subDTypep());
-        puts(" ");
-        puts(nodep->prettyName());
+        puts(" " + nodep->prettyName());
+        m_arrayPost = true;
+        iterateConstNull(nodep->subDTypep());
         puts(";\n");
     }
     void visit(AstNodeCoverOrAssert* nodep) override {
@@ -930,26 +1145,34 @@ class EmitVBaseVisitorConst VL_NOT_FINAL : public VNVisitorConst {
     }
     void visit(AstBasicDType* nodep) override {
         if (m_arrayPost) return;
-        putfs(nodep, nodep->prettyName());
-        if (nodep->isSigned() && !nodep->keyword().isDouble()) putfs(nodep, " signed");
-        // Do not emit ranges for integer atoms.
-        if (nodep->keyword().isIntNumeric() && !nodep->keyword().isBitLogic()) return;
+        // V3Width rewrites std::process::m_process from chandle to a C++ process reference
+        // Revert and emit it as in the source
+        if (nodep->keyword() == VBasicDTypeKwd::PROCESS_REFERENCE) {
+            puts("chandle");
+            return;
+        }
+        // If nodep was marked as implicit, no type name was written in the source
+        if (!nodep->implicit()) {
+            putfs(nodep, nodep->prettyName());
+            if (!nodep->keyword().isDouble()) {
+                if (nodep->isSigned() && !nodep->keyword().isSigned()) puts(" signed");
+                if (!nodep->isSigned() && nodep->keyword().isSigned()) puts(" unsigned");
+            }
+            // Only bit/logic vectors can carry a packed range
+            if (!nodep->keyword().isBitLogic()) return;
+        }
         emitPacked();
         if (nodep->rangep()) {
             puts(" ");
             iterateAndNextConstNull(nodep->rangep());
             puts(" ");
         } else if (nodep->isRanged()) {
-            puts(" [");
-            puts(cvtToStr(nodep->hi()));
-            puts(":");
-            puts(cvtToStr(nodep->lo()));
-            puts("] ");
+            puts(" [" + cvtToStr(nodep->left()) + ":" + cvtToStr(nodep->right()) + "] ");
         }
     }
     void visit(AstConstDType* nodep) override {
-        if (m_arrayPost) return;
-        putfs(nodep, "const ");
+        // 'const' is printed by the declaration in visit(AstVar* instead)
+        // This visitor cannot guarentee qualifier ordering (e.g, putting protected before const)
         iterateConst(nodep->subDTypep());
     }
     void visit(AstDynArrayDType* nodep) override {
@@ -959,6 +1182,67 @@ class EmitVBaseVisitorConst VL_NOT_FINAL : public VNVisitorConst {
             puts("[]");
             iterateConst(nodep->subDTypep());  // For post's key
         }
+    }
+    void visit(AstUnsizedArrayDType* nodep) override {
+        if (!m_arrayPost) {
+            iterateConst(nodep->subDTypep());
+            if (nodep->packed()) puts(" []");
+        } else {
+            if (!nodep->packed()) puts("[]");
+            iterateConst(nodep->subDTypep());  // For post's key
+        }
+    }
+    void visit(AstClass* nodep) override {
+        VL_RESTORER(m_activeClassp);
+        m_activeClassp = nodep;
+
+        if (nodep->isVirtual()) puts("virtual ");
+        puts(nodep->verilogKwd() + " ");
+        puts(nodep->prettyName());
+        // A specialization's name is mangled, so only the generic carries the '#()' header
+        if (nodep->name() == nodep->origName()) {
+            bool first = true;
+            for (const AstNode* stmtp = nodep->membersp(); stmtp; stmtp = stmtp->nextp()) {
+                if (const AstParamTypeDType* const ptp = VN_CAST(stmtp, ParamTypeDType)) {
+                    if (!ptp->isGParam()) continue;
+                    puts(first ? " #(" : ", ");
+                    first = false;
+                    UASSERT_OBJ(ptp->childDTypep(), ptp, "Type parameter without a dtype");
+                    puts("type " + ptp->prettyName() + " = ");
+                    emitDType(ptp->childDTypep());
+                } else if (const AstVar* const varp = VN_CAST(stmtp, Var)) {
+                    if (!varp->isGParam()) continue;
+                    puts(first ? " #(" : ", ");
+                    first = false;
+                    UASSERT_OBJ(varp->childDTypep(), varp, "Value parameter without a dtype");
+                    // An implicit type has nothing to print ahead of the name
+                    const AstBasicDType* const basicp = VN_CAST(varp->childDTypep(), BasicDType);
+                    if (!(basicp && basicp->implicit())) {
+                        emitDType(varp->childDTypep());
+                        puts(" ");
+                    }
+                    puts(varp->prettyName());
+                    if (varp->valuep()) {
+                        puts(" = ");
+                        emitInitValue(varp->valuep(), varp->subDTypep());
+                    }
+                }
+            }
+            if (!first) puts(")");
+        }
+
+        for (AstClassExtends* extp = nodep->extendsp(); extp;
+             extp = VN_AS(extp->nextp(), ClassExtends)) {
+            puts(" " + extp->verilogKwd() + " ");
+            if (AstNodeDType* const cdtp = extp->childDTypep()) emitDType(cdtp);
+        }
+        puts(";\n");
+
+        for (AstNode* itemp = nodep->membersp(); itemp; itemp = itemp->nextp()) {
+            // Type parameters are emitted in the #() header, not the body
+            if (!VN_IS(itemp, ParamTypeDType)) iterateConst(itemp);
+        }
+        putqs(nodep, "end" + nodep->verilogKwd() + "\n");
     }
     void visit(AstEnumDType* nodep) override {
         if (m_arrayPost) return;
@@ -978,8 +1262,10 @@ class EmitVBaseVisitorConst VL_NOT_FINAL : public VNVisitorConst {
     void visit(AstEnumItem* nodep) override {
         putfs(nodep, nodep->name());
         iterateConstNull(nodep->rangep());
-        puts(" = ");
-        iterateConstNull(nodep->valuep());
+        if (nodep->valuep()) {
+            puts(" = ");
+            iterateConst(nodep->valuep());
+        }
         if (nodep->nextp()) puts(",");
         puts("\n");
     }
@@ -1014,15 +1300,27 @@ class EmitVBaseVisitorConst VL_NOT_FINAL : public VNVisitorConst {
         puts(nodep->ifaceName());
     }
     void visit(AstRefDType* nodep) override {
-        if (nodep->subDTypep()) {
-            iterateConst(nodep->skipRefp());
-        } else {
+        if (!nodep->subDTypep()) {
             puts("\n???? // "s + nodep->prettyTypeName() + " -> UNLINKED\n");
+            return;
         }
+        if (const AstTypedef* const tdefp = nodep->typedefp()) {
+            // Any dimensions belong to the typedef, not to what references it
+            if (m_arrayPost) return;
+            puts(tdefp->prettyName());
+            return;
+        }
+        iterateConst(nodep->skipRefp());
     }
     void visit(AstClassRefDType* nodep) override {
+        if (m_arrayPost) return;
         UASSERT_OBJ(nodep->classp(), nodep, "AstClassRefDType not linked");
-        putfs(nodep, EmitCUtil::prefixNameProtect(nodep->classp()));
+        puts(nodep->classp()->prettyName());
+        if (nodep->paramsp()) {
+            puts(" #(");
+            iterateAndCommaConstNull(nodep->paramsp());
+            puts(")");
+        }
     }
     void visit(AstRequireDType* nodep) override { iterateConst(nodep->lhsp()); }
     void visit(AstModport* nodep) override {
@@ -1056,19 +1354,23 @@ class EmitVBaseVisitorConst VL_NOT_FINAL : public VNVisitorConst {
         {
             puts("{\n");
             VL_RESTORER_CLEAR(m_packedps);
-            for (AstMemberDType* itemp = nodep->membersp(); itemp;
-                 itemp = VN_AS(itemp->nextp(), MemberDType)) {
-                iterateConst(itemp);
-            }
+            for (AstMemberDType* const itemp : nodep->memberspList()) { iterateConst(itemp); }
             puts("}");
         }
         emitPacked();
     }
     void visit(AstMemberDType* nodep) override {
+        VL_RESTORER(m_arrayPost);
         if (m_arrayPost) return;
         iterateConst(nodep->subDTypep());
         puts(" ");
         puts(nodep->name());
+        m_arrayPost = true;
+        iterateConstNull(nodep->subDTypep());  // "[$]", "[N]" on the member
+        if (AstNode* const valuep = nodep->valuep()) {
+            puts(" = ");
+            emitInitValue(valuep, nodep->subDTypep());
+        }
         puts(";\n");
     }
     void visit(AstQueueDType* nodep) override {
@@ -1108,7 +1410,15 @@ class EmitVBaseVisitorConst VL_NOT_FINAL : public VNVisitorConst {
         iterateAndNextConstNull(nodep->argsp());
         puts(")");
     }
-    void visit(AstArg* nodep) override { iterateAndNextConstNull(nodep->exprp()); }
+    void visit(AstArg* nodep) override {
+        if (!nodep->name().empty()) {
+            puts("." + nodep->prettyName() + "(");
+            iterateAndNextConstNull(nodep->exprp());
+            puts(")");
+            return;
+        }
+        iterateAndNextConstNull(nodep->exprp());
+    }
     void visit(AstWith* nodep) override {
         putfs(nodep, " with (");
         iterateConstNull(nodep->exprp());
@@ -1183,19 +1493,12 @@ class EmitVBaseVisitorConst VL_NOT_FINAL : public VNVisitorConst {
     void visit(AstVarRef* nodep) override {
         if (nodep->varScopep()) {
             putfs(nodep, nodep->varScopep()->prettyName());
-        } else {
-            if (nodep->varp()) {
-                if (nodep->selfPointer().isEmpty()) {
-                    putfs(nodep, nodep->varp()->prettyName());
-                } else {
-                    putfs(nodep, nodep->selfPointer().asString());
-                    putfs(nodep, "->");
-                    puts(nodep->varp()->prettyName());
-                }
-            } else {
-                putfs(nodep, nodep->name());
-            }
+            return;
         }
+        const AstVar* const varp = nodep->varp();
+        UASSERT_OBJ(varp, nodep, "AstVarRef not linked");
+        if (!nodep->selfPointer().isEmpty()) puts("this.");
+        putfs(nodep, varp->prettyName());
     }
     void visit(AstVarXRef* nodep) override {
         putfs(nodep, nodep->prettyName(nodep->dotted()));
@@ -1206,23 +1509,50 @@ class EmitVBaseVisitorConst VL_NOT_FINAL : public VNVisitorConst {
             puts(nodep->prettyName());
         }
     }
-    void visit(AstConst* nodep) override { putfs(nodep, nodep->num().ascii(m_prefixed, true)); }
+    void visit(AstConst* nodep) override {
+        const V3Number& num = nodep->num();
+        // Emit strings as actual strings, not as numbers
+        if (num.isString() || num.isFromString()) {
+            putsQuoted(num.toString());
+            return;
+        }
+        putfs(nodep, num.ascii(m_prefixed, true));
+    }
+    void visit(AstUnbounded* nodep) override { emitVerilogFormat(nodep, nodep->emitVerilog()); }
 
     // Just iterate
     void visit(AstTopScope* nodep) override { iterateChildrenConst(nodep); }
     void visit(AstScope* nodep) override { iterateChildrenConst(nodep); }
     void visit(AstVar* nodep) override {
-        if (nodep->isIO()) {
+        if (m_activeClassp && nodep->isGParam()) return;
+        if (nodep->isIO() || nodep->varType() == VVarType::WIRE || nodep->isTristate()) {
             putfs(nodep, nodep->verilogKwd());
             puts(" ");
         }
-        VL_RESTORER(m_arrayPost);
-        m_arrayPost = false;
-        iterateConstNull(nodep->dtypep());  // Dtype part before identifier
-        puts(" ");
-        puts(nodep->prettyName());
-        m_arrayPost = true;
-        iterateConstNull(nodep->dtypep());  // Dtype part after identifier
+
+        if (nodep->isHideLocal()) {
+            puts("local ");
+        } else if (nodep->isHideProtected()) {
+            puts("protected ");
+        }
+        if (isConstDecl(nodep) && !nodep->isParam()) puts("const ");
+        if (m_activeClassp && nodep->lifetime().isStatic()) puts("static ");
+        if (nodep->rand().isRand()) puts(nodep->rand().isRandC() ? "randc " : "rand ");
+        if (nodep->isParam()) puts(nodep->isGParam() ? "parameter " : "localparam ");
+
+        {
+            VL_RESTORER(m_arrayPost);
+            m_arrayPost = false;
+            iterateConstNull(nodep->subDTypep());  // Dtype part before identifier
+            puts(" ");
+            puts(nodep->prettyName());
+            m_arrayPost = true;
+            iterateConstNull(nodep->subDTypep());  // Dtype part after identifier
+        }
+        if (nodep->valuep()) {
+            puts(" = ");
+            emitInitValue(nodep->valuep(), nodep->subDTypep());
+        }
         puts(m_suppressVarSemi ? "\n" : ";\n");
     }
     void visit(AstActive* nodep) override {
@@ -1267,11 +1597,9 @@ class EmitVBaseVisitorConst VL_NOT_FINAL : public VNVisitorConst {
         }
     }
     void visit(AstCAwait* nodep) override {
-        AstCMethodHard* methodp = VN_CAST(nodep->exprp(), CMethodHard);
-        UASSERT_OBJ(methodp, nodep, "AstCAwait expression must be an AstCMethodHard");
-        puts("");  // this is for proper alignment
-        puts("#");
-        iterateConst(methodp->pinsp());
+        putfs(nodep, "co_await ");
+        iterateConst(nodep->exprp());
+        puts(";\n");
     }
     void visit(AstParseRef* nodep) override { puts(nodep->prettyName()); }
     void visit(AstVarScope*) override {}
@@ -1290,6 +1618,57 @@ class EmitVBaseVisitorConst VL_NOT_FINAL : public VNVisitorConst {
             nodep->v3error(
                 "Internal: Unknown node type reached emitter: " << nodep->prettyTypeName());
         }
+    }
+    void visit(AstParamTypeDType* nodep) override { puts(nodep->prettyName()); }
+    void visit(AstBracketArrayDType* nodep) override {
+        if (!m_arrayPost) {
+            iterateConst(nodep->childDTypep());
+            return;
+        }
+        puts("[");
+        AstNode* const elementsp = nodep->elementsp();
+        UASSERT_OBJ(elementsp, nodep, "BracketArrayDType without elements");
+        VL_RESTORER(m_arrayPost);
+        m_arrayPost = false;
+        iterateConst(elementsp);
+        puts("]");
+        iterateConst(nodep->childDTypep());
+    }
+    void visit(AstClassOrPackageRef* nodep) override {
+        puts(nodep->prettyName());
+        if (nodep->paramsp()) {
+            puts(" #(");
+            iterateAndCommaConstNull(nodep->paramsp());
+            puts(")");
+        }
+    }
+    void visit(AstMethodCall* nodep) override {
+        iterateConst(nodep->fromp());
+        puts("." + nodep->prettyName() + "(");
+        iterateAndCommaConstNull(nodep->argsp());
+        puts(")");
+        if (nodep->withp()) iterateConst(nodep->withp());
+    }
+    void visit(AstCast* nodep) override {
+        puts("(");
+        UASSERT_OBJ(nodep->childDTypep(), nodep, "AstCast without child dtype");
+        emitDType(nodep->childDTypep());
+        puts("'(");
+        iterateConst(nodep->fromp());
+        puts("))");
+    }
+    void visit(AstRToIRoundS* nodep) override {
+        puts(cvtToStr(nodep->width()) + "'(");
+        iterateConst(nodep->lhsp());
+        puts(")");
+    }
+    void visit(AstPin* nodep) override {
+        UASSERT_OBJ(nodep->exprp(), nodep, "Pin without expression");
+        // A positional pin has no name; a named one keeps the '.name(expr)' form
+        const bool named = !nodep->name().empty();
+        if (named) puts("." + nodep->prettyName() + "(");
+        iterateConst(nodep->exprp());
+        if (named) puts(")");
     }
 
 public:
@@ -1367,8 +1746,7 @@ std::string V3EmitV::debugVerilogForTree(const AstNode* nodep) {
 
 void V3EmitV::emitvFiles() {
     UINFO(2, __FUNCTION__ << ":");
-    for (AstNodeFile* filep = v3Global.rootp()->filesp(); filep;
-         filep = VN_AS(filep->nextp(), NodeFile)) {
+    for (AstNodeFile* const filep : v3Global.rootp()->filespList()) {
         AstVFile* const vfilep = VN_CAST(filep, VFile);
         if (vfilep && vfilep->tblockp()) {
             V3OutVFile of{vfilep->name()};
