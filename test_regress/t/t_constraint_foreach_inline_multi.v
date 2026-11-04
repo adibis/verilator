@@ -33,11 +33,18 @@ class GridArg;
   endfunction
 endclass
 
+class Cube;
+  rand bit [3:0] cube[2][2][2];
+endclass
+
 module t;
 
   initial begin
     automatic Grid g = new;
     automatic GridArg ga = new;
+    automatic Cube cu = new;
+    bit [3:0] sarr[2][2];
+    int std_result;
 
     // Filed shape: multi-index foreach, inline with, no randomize argument
     repeat (20) begin
@@ -59,6 +66,25 @@ module t;
       if (!bit'(g.randomize() with {foreach (grid[i]) grid[i][0] inside {[1:9]};}))
         $stop;
       if (!(g.grid[0][0] inside {[1:9]})) $stop;
+    end
+
+    // Three loop variables -- the third also sits mid-list under the header
+    repeat (20) begin
+      if (!bit'(cu.randomize() with {foreach (cube[i, j, k]) cube[i][j][k] inside {[2:7]};}))
+        $stop;
+      for (int i = 0; i < 2; i++)
+        for (int j = 0; j < 2; j++)
+          for (int k = 0; k < 2; k++)
+            if (!(cu.cube[i][j][k] inside {[2:7]})) $stop;
+    end
+
+    // std::randomize() with{} goes through the same capture path
+    repeat (20) begin
+      std_result = std::randomize(
+          sarr) with {foreach (sarr[i, j]) sarr[i][j] inside {[3:5]};};
+      if (std_result != 1) $stop;
+      for (int i = 0; i < 2; i++)
+        for (int j = 0; j < 2; j++) if (!(sarr[i][j] inside {[3:5]})) $stop;
     end
 
     $write("*-* All Finished *-*\n");
