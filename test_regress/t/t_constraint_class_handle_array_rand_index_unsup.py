@@ -11,6 +11,8 @@ import vltest_bootstrap
 
 test.scenarios('vlt')
 
-test.lint(expect_filename=test.golden_filename, verilator_flags2=['--error-limit 1000'], fails=True)
+test.lint(expect_filename=test.golden_filename,
+          verilator_flags2=['--error-limit 1000'],
+          fails=True)
 
 test.passes()
