@@ -1,0 +1,8 @@
+%Error-UNSUPPORTED: t/t_constraint_array_index_nonzero_unsup.v:12:22: Unsupported: rand-dependent index into non-zero-based non-rand array
+   12 |   constraint c { pool[r] == 8'h77; }
+      |                      ^
+                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=latest
+%Error-UNSUPPORTED: t/t_constraint_array_index_nonzero_unsup.v:19:22: Unsupported: rand-dependent index into non-zero-based non-rand array
+   19 |   constraint c { pool[r] == 8'h77; }
+      |                      ^
+%Error: Exiting due to

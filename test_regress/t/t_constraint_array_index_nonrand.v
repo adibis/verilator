@@ -1,0 +1,618 @@
+// DESCRIPTION: Verilator: Verilog Test module
+//
+// This file ONLY is placed under the Creative Commons Public Domain.
+// SPDX-FileCopyrightText: 2026 Wilson Snyder
+// SPDX-License-Identifier: CC0-1.0
+
+// verilog_format: off
+`define stop $stop
+`define checkd(gotv,expv) do if ((gotv) !== (expv)) begin $write("%%Error: %s:%0d:  got=%0d exp=%0d\n", `__FILE__,`__LINE__, (gotv), (expv)); `stop; end while(0);
+// verilog_format: on
+
+// Test the "pick an unused ID" idiom: a rand index into a
+// non-rand array must stay symbolic in the solver, not fold to a constant.
+
+class UniqueIdPool;
+  rand int id;
+  bit used[16];
+
+  constraint c_range { id inside {[0:15]}; }
+  constraint c_unused { !used[id]; }
+endclass
+
+// Same idiom, reached via a member select on another object.
+class Holder;
+  bit used[16];
+endclass
+
+class UniqueIdPoolViaMember;
+  rand int id;
+  Holder holder;
+
+  constraint c_range { id inside {[0:15]}; }
+  constraint c_unused { !holder.used[id]; }
+
+  function new();
+    holder = new;
+  endfunction
+endclass
+
+// A rand array indexed by a rand value: unaffected by this fix, kept
+// here for coverage of the "array is rand" path.
+class RandArrayRandIndex;
+  rand int idx;
+  rand bit [7:0] data[4];
+  constraint c_idx { idx inside {[0:3]}; }
+  constraint c_data { data[idx] == 8'hAA; }
+endclass
+
+// Same, but the rand array is multidimensional.
+class RandMultidimRandIndex;
+  rand int idx;
+  rand bit [7:0] data[4][4];
+  constraint c_idx { idx inside {[0:3]}; }
+  constraint c_data { data[idx][0] == 8'hAA; }
+endclass
+
+// Same, but the rand index is the outer subscript instead of the inner one --
+// reaching the rand base variable through a nested array select, not a direct one.
+class RandMultidimRandIndexOuter;
+  rand int idx;
+  rand bit [7:0] data[4][4];
+  constraint c_idx { idx inside {[0:3]}; }
+  constraint c_data { data[0][idx] == 8'hAA; }
+endclass
+
+// Same shape at the exact 2x2 size the regression was originally reported
+// at, distinct from the 4x4 case above.
+class RandMultidimRandIndexOuterMinimal;
+  rand int idx;
+  rand bit [7:0] data[2][2];
+  constraint c_idx { idx inside {[0:1]}; }
+  constraint c_data { data[0][idx] == 8'hAA; }
+endclass
+
+// Same, but three dimensions deep with the rand index outermost -- the array's
+// root must resolve through two nested index selects to reach the base array,
+// not just one as in the two-dimensional case above.
+class RandMultidimRandIndexDeep;
+  rand int idx;
+  rand bit [7:0] data[4][4][4];
+  constraint c_idx { idx inside {[0:3]}; }
+  constraint c_data { data[1][2][idx] == 8'hAA; }
+endclass
+
+// Same idiom again, but the rand array is a queue directly rather than a
+// fixed array.
+class RandQueueRandIndex;
+  rand bit data[$];
+  rand int idx;
+  constraint c_size { data.size() == 4; }
+  constraint c_idx { idx inside {[0:3]}; }
+  constraint c_data { data[idx] == 1; }
+endclass
+
+// An out-of-range index reads as 0 (IEEE 1800-2023 7.4.5), not as the last
+// element -- an index equal to the size is only satisfiable if the solver
+// models that default correctly.
+class OutOfBoundsIndex;
+  rand int idx;
+  bit used[3] = '{1, 1, 1};
+  constraint c { idx == 3; used[idx] == 0; }
+endclass
+
+// Same, but the index runs negative instead of past the top.
+class OutOfBoundsIndexNegative;
+  rand int idx;
+  bit used[3] = '{1, 1, 1};
+  constraint c { idx == -1; used[idx] == 0; }
+endclass
+
+// Same, but the index is wide enough to alias back into range if truncated to
+// the array's 2-bit index width (4 reads element 0, 5 reads element 1).
+class OutOfBoundsIndexPastIndexWidth;
+  rand int idx;
+  bit used[3] = '{1, 1, 1};
+  constraint c { idx inside {[4:5]}; used[idx] == 0; }
+endclass
+
+// An explicit [1:0] part-select does truncate, so 4 reads element 0.
+class ExplicitlyTruncatedIndex;
+  rand int idx;
+  bit used[3] = '{1, 1, 1};
+  constraint c { idx == 4; used[idx[1:0]] == 0; }
+endclass
+
+// The index is exactly the array's index width, so there's no truncation.
+class ExactWidthIndex;
+  rand bit [1:0] idx;
+  bit used[4] = '{1, 1, 0, 1};
+  constraint c { used[idx] == 0; }
+endclass
+
+// An inline randomize() with spells the rand index as a member reference, which
+// must keep the index's own width (a match past the truncation boundary is the guard).
+class InlineWithPool;
+  rand int idx;
+  bit [7:0] pool[4];
+  function new(); pool = '{8'h11, 8'h22, 8'h33, 8'h44}; endfunction
+endclass
+
+// A rand index into a fixed array reached through a rand dynamic, queue,
+// or associative outer array.
+class RandDynOuterRandIndex;
+  rand int idx;
+  rand bit [7:0] data[][2];
+  constraint c { idx inside {[0:1]}; data.size() == 1; data[0][idx] == 8'hAA; }
+endclass
+
+class RandQueueOuterRandIndex;
+  rand int idx;
+  rand bit [7:0] data[$][2];
+  constraint c { idx inside {[0:1]}; data.size() == 1; data[0][idx] == 8'hAA; }
+endclass
+
+class RandAssocOuterRandIndex;
+  rand int idx;
+  rand bit [7:0] data[int][2];
+  constraint c { idx inside {[0:1]}; data[0][idx] == 8'hAA; }
+  function new();
+    data[0][0] = 8'h00;
+    data[0][1] = 8'h00;
+  endfunction
+endclass
+
+// A non-rand index (a method call) on the way to a non-rand array.
+class HolderQueueLastIndex;
+  rand int idx;
+  Holder holders[$];
+  constraint c { idx inside {[0:15]}; holders[holders.size() - 1].used[idx]; }
+  function new();
+    Holder h0 = new;
+    Holder h1 = new;
+    h1.used[5] = 1'b1;
+    holders.push_back(h0);
+    holders.push_back(h1);
+  endfunction
+endclass
+
+typedef struct {
+  bit [7:0] a;
+  bit [7:0] b;
+} s_t;
+
+// Member select off a constant-indexed struct array, which must keep dotted
+// member naming rather than folding to a generic select.
+class StructArrayConstIndex;
+  rand s_t arr[4];
+  constraint c_a { arr[2].a == 8'hBB; }
+endclass
+
+// Packed-struct elements are ordinary bit vectors.
+typedef struct packed {
+  bit [1:0] x;
+  bit y;
+} packed_elem_t;
+class PackedStructPool;
+  rand int idx;
+  packed_elem_t used[4];
+  constraint c { idx inside {[0:5]}; used[idx] == 3'b101; }
+  function new();
+    used = '{3'b000, 3'b001, 3'b101, 3'b010};
+  endfunction
+endclass
+
+// The array as a member of a non-rand struct, in range and out of range.
+typedef struct {
+  bit used[4];
+} pool_s;
+class StructFieldPool;
+  rand int idx;
+  pool_s pool;
+  constraint c { idx inside {[0:5]}; pool.used[idx] == 0; idx != 4; idx != 5; }
+  function new();
+    pool.used = '{1, 1, 0, 1};
+  endfunction
+endclass
+
+class StructFieldPoolOob;
+  rand int idx;
+  pool_s pool;
+  constraint c { idx == 6; pool.used[idx] == 0; }
+  function new();
+    pool.used = '{1, 1, 1, 1};
+  endfunction
+endclass
+
+// A member index to std::randomize(): the answer (2) needs the index's high
+// bit, which a truncation to the array's index width would lose.
+class StdMemberPool;
+  int idx;
+  bit [7:0] used[4];
+  function new();
+    used = '{8'h11, 8'h22, 8'h33, 8'h44};
+  endfunction
+endclass
+
+// An explicit size cast does truncate, so 4 reads element 0.
+class ExplicitlyCastIndex;
+  rand int unsigned idx;
+  bit used[4] = '{1, 1, 1, 1};
+  constraint c { idx == 4; used[2'(idx)] == 0; }
+endclass
+
+// A negative signed index is out of range, so the read is the default.
+class SignedNegativeIndex;
+  rand bit signed [1:0] idx;
+  bit used[3] = '{1, 1, 1};
+  constraint c { idx == -2; used[idx] == 0; }
+endclass
+
+// An index narrower than the array's index width still reaches every element.
+/* verilator lint_off WIDTHEXPAND */
+class NarrowIndex;
+  rand bit idx;
+  bit used[4] = '{1, 0, 1, 1};
+  constraint c { used[idx] == 0; }
+endclass
+/* verilator lint_on WIDTHEXPAND */
+
+// An inline index mixing a non-rand member with the rand one: the rand member
+// must still keep its width.
+class InlineMixedMemberIndex;
+  rand bit [3:0] k;
+  bit [3:0] c;
+  bit [7:0] pool[16];
+  function new();
+    c = 3;
+    pool = '{8'h00, 8'h01, 8'h02, 8'h03, 8'h04, 8'h55, 8'h06, 8'h07,
+             8'h08, 8'h09, 8'h0a, 8'h0b, 8'h0c, 8'h0d, 8'h0e, 8'h0f};
+  endfunction
+endclass
+
+// A state index read through a handle: no with-clause is involved, so the
+// member resolves through its object.
+class HolderState;
+  bit [2:0] c = 5;
+endclass
+class HolderStateIndex;
+  HolderState h;
+  bit [7:0] pool[8];
+  constraint c { pool[h.c] == 8'h55; }
+  function new();
+    h = new;
+    pool = '{8'h00, 8'h01, 8'h02, 8'h03, 8'h04, 8'h55, 8'h06, 8'h07};
+  endfunction
+endclass
+
+// An index read through an array-method item: the member's base is the
+// method's item, not the with-object.
+class ItemElem;
+  bit [3:0] memb;
+endclass
+class ItemMemberSumIndex;
+  ItemElem q[$];
+  bit [7:0] pool[16];
+  constraint c { q.sum() with (pool[item.memb]) == 8'h00; }
+  function new();
+    automatic ItemElem e = new;
+    e.memb = 0;
+    q.push_back(e);
+    pool = '{8'h00, 8'h01, 8'h02, 8'h03, 8'h04, 8'h05, 8'h06, 8'h07,
+             8'h08, 8'h09, 8'h0a, 8'h0b, 8'h0c, 8'h0d, 8'h0e, 8'h0f};
+  endfunction
+endclass
+
+// Same sum, but the target value matches nothing: must stay UNSAT.
+class ItemMemberSumIndexUnsat;
+  ItemElem q[$];
+  bit [7:0] pool[16];
+  constraint c { q.sum() with (pool[item.memb]) == 8'hFF; }
+  function new();
+    automatic ItemElem e = new;
+    e.memb = 0;
+    q.push_back(e);
+    pool = '{8'h00, 8'h01, 8'h02, 8'h03, 8'h04, 8'h05, 8'h06, 8'h07,
+             8'h08, 8'h09, 8'h0a, 8'h0b, 8'h0c, 8'h0d, 8'h0e, 8'h0f};
+  endfunction
+endclass
+
+
+module t;
+  initial begin
+    UniqueIdPool obj;
+    UniqueIdPoolViaMember mobj;
+    RandArrayRandIndex rand_obj;
+    RandMultidimRandIndex mrand_obj;
+    RandMultidimRandIndexOuter mrand_outer_obj;
+    RandMultidimRandIndexOuterMinimal mrand_outer_min_obj;
+    RandMultidimRandIndexDeep mrand_deep_obj;
+    RandQueueRandIndex rq_obj;
+    StructArrayConstIndex sa_const_obj;
+    OutOfBoundsIndex oob_obj;
+    OutOfBoundsIndexNegative oob_neg_obj;
+    ExplicitlyCastIndex cast_obj;
+    SignedNegativeIndex sneg_obj;
+    NarrowIndex narrow_obj;
+    OutOfBoundsIndexPastIndexWidth oob_wide_obj;
+    ExplicitlyTruncatedIndex trunc_obj;
+    ExactWidthIndex exact_obj;
+    InlineWithPool iw_obj;
+    RandDynOuterRandIndex rdyn_outer_obj;
+    RandQueueOuterRandIndex rq_outer_obj;
+    RandAssocOuterRandIndex raa_outer_obj;
+    HolderQueueLastIndex hq_last_obj;
+    PackedStructPool ps_obj;
+    StructFieldPool sf_obj;
+    StructFieldPoolOob sf_oob_obj;
+    InlineMixedMemberIndex imm_obj;
+    HolderStateIndex hs_obj;
+    ItemMemberSumIndex ims_obj;
+    ItemMemberSumIndexUnsat ims_u_obj;
+    bit [15:0] seen;
+    int randomize_result;
+
+    rand_obj = new;
+    for (int i = 0; i < 20; i++) begin
+      randomize_result = rand_obj.randomize();
+      `checkd(randomize_result, 1);
+      `checkd(rand_obj.data[rand_obj.idx], 8'hAA);
+    end
+
+    mrand_obj = new;
+    for (int i = 0; i < 20; i++) begin
+      randomize_result = mrand_obj.randomize();
+      `checkd(randomize_result, 1);
+      `checkd(mrand_obj.data[mrand_obj.idx][0], 8'hAA);
+    end
+
+    mrand_outer_obj = new;
+    for (int i = 0; i < 20; i++) begin
+      randomize_result = mrand_outer_obj.randomize();
+      `checkd(randomize_result, 1);
+      `checkd(mrand_outer_obj.data[0][mrand_outer_obj.idx], 8'hAA);
+    end
+
+    mrand_outer_min_obj = new;
+    for (int i = 0; i < 20; i++) begin
+      randomize_result = mrand_outer_min_obj.randomize();
+      `checkd(randomize_result, 1);
+      `checkd(mrand_outer_min_obj.data[0][mrand_outer_min_obj.idx], 8'hAA);
+    end
+
+    mrand_deep_obj = new;
+    for (int i = 0; i < 20; i++) begin
+      randomize_result = mrand_deep_obj.randomize();
+      `checkd(randomize_result, 1);
+      `checkd(mrand_deep_obj.data[1][2][mrand_deep_obj.idx], 8'hAA);
+    end
+
+    rq_obj = new;
+    for (int i = 0; i < 20; i++) begin
+      randomize_result = rq_obj.randomize();
+      `checkd(randomize_result, 1);
+      `checkd(rq_obj.data[rq_obj.idx], 1'b1);
+    end
+
+    sa_const_obj = new;
+    for (int i = 0; i < 20; i++) begin
+      randomize_result = sa_const_obj.randomize();
+      `checkd(randomize_result, 1);
+      `checkd(sa_const_obj.arr[2].a, 8'hBB);
+    end
+
+    oob_obj = new;
+    randomize_result = oob_obj.randomize();
+    `checkd(randomize_result, 1);
+    `checkd(oob_obj.idx, 3);
+
+    oob_neg_obj = new;
+    randomize_result = oob_neg_obj.randomize();
+    `checkd(randomize_result, 1);
+    `checkd(oob_neg_obj.idx, -1);
+
+    cast_obj = new;
+    randomize_result = cast_obj.randomize();
+    `checkd(randomize_result, 0);
+
+    sneg_obj = new;
+    randomize_result = sneg_obj.randomize();
+    `checkd(randomize_result, 1);
+    `checkd(sneg_obj.idx, -2);
+
+    narrow_obj = new;
+    for (int i = 0; i < 10; i++) begin
+      randomize_result = narrow_obj.randomize();
+      `checkd(randomize_result, 1);
+      `checkd(narrow_obj.idx, 1);
+    end
+
+    oob_wide_obj = new;
+    seen = '0;
+    for (int i = 0; i < 20; i++) begin
+      randomize_result = oob_wide_obj.randomize();
+      `checkd(randomize_result, 1);
+      if (oob_wide_obj.idx < 4 || oob_wide_obj.idx > 5) begin
+        $write("%%Error: idx out of range: %0d\n", oob_wide_obj.idx);
+        `stop;
+      end
+      seen[oob_wide_obj.idx] = 1'b1;
+    end
+    `checkd(seen, 16'h0030);
+
+    trunc_obj = new;
+    randomize_result = trunc_obj.randomize();
+    `checkd(randomize_result, 0);
+
+    exact_obj = new;
+    for (int i = 0; i < 20; i++) begin
+      randomize_result = exact_obj.randomize();
+      `checkd(randomize_result, 1);
+      `checkd(exact_obj.idx, 2);
+    end
+
+    rdyn_outer_obj = new;
+    for (int i = 0; i < 20; i++) begin
+      randomize_result = rdyn_outer_obj.randomize();
+      `checkd(randomize_result, 1);
+      `checkd(rdyn_outer_obj.data[0][rdyn_outer_obj.idx], 8'hAA);
+    end
+
+    rq_outer_obj = new;
+    for (int i = 0; i < 20; i++) begin
+      randomize_result = rq_outer_obj.randomize();
+      `checkd(randomize_result, 1);
+      `checkd(rq_outer_obj.data[0][rq_outer_obj.idx], 8'hAA);
+    end
+
+    raa_outer_obj = new;
+    for (int i = 0; i < 20; i++) begin
+      randomize_result = raa_outer_obj.randomize();
+      `checkd(randomize_result, 1);
+      `checkd(raa_outer_obj.data[0][raa_outer_obj.idx], 8'hAA);
+    end
+
+    hq_last_obj = new;
+    for (int i = 0; i < 20; i++) begin
+      randomize_result = hq_last_obj.randomize();
+      `checkd(randomize_result, 1);
+      `checkd(hq_last_obj.idx, 5);
+    end
+
+    ps_obj = new;
+    for (int i = 0; i < 20; i++) begin
+      randomize_result = ps_obj.randomize();
+      `checkd(randomize_result, 1);
+      `checkd(ps_obj.idx, 2);
+    end
+
+    sf_obj = new;
+    for (int i = 0; i < 20; i++) begin
+      randomize_result = sf_obj.randomize();
+      `checkd(randomize_result, 1);
+      `checkd(sf_obj.idx, 2);
+    end
+
+    sf_oob_obj = new;
+    randomize_result = sf_oob_obj.randomize();
+    `checkd(randomize_result, 1);
+    `checkd(sf_oob_obj.idx, 6);
+
+    mobj = new;
+    for (int i = 0; i < 16; i++) begin
+      randomize_result = mobj.randomize();
+      `checkd(randomize_result, 1);
+      if (mobj.id < 0 || mobj.id > 15) begin
+        $write("%%Error: id out of range: %0d\n", mobj.id);
+        `stop;
+      end
+      mobj.holder.used[mobj.id] = 1'b1;
+    end
+
+    // Repeat the whole draw-all-then-exhaust cycle on a fresh object each
+    // time, to guard against solver-randomness flakiness masking a bug.
+    repeat (20) begin
+      obj = new;
+      seen = '0;
+      for (int i = 0; i < 16; i++) begin
+        randomize_result = obj.randomize();
+        `checkd(randomize_result, 1);
+        // Each draw must be a legal, not-yet-drawn value
+        if (obj.id < 0 || obj.id > 15) begin
+          $write("%%Error: id out of range: %0d\n", obj.id);
+          `stop;
+        end
+        if (seen[obj.id]) begin
+          $write("%%Error: id %0d drawn twice\n", obj.id);
+          `stop;
+        end
+        seen[obj.id] = 1'b1;
+        obj.used[obj.id] = 1'b1;
+      end
+      // All 16 ids must have been drawn exactly once
+      `checkd(seen, 16'hffff);
+      // Pool exhausted -- no legal value remains
+      randomize_result = obj.randomize();
+      `checkd(randomize_result, 0);
+    end
+
+    // A rand index into an array that's itself a std::randomize() argument:
+    // the argument's own captured copy must stay a symbolic SMT value, the
+    // same as a class's own rand member would.
+    begin
+      bit [7:0] sarr[4];
+      int sidx;
+      int std_result;
+      for (int i = 0; i < 20; i++) begin
+        sarr = '{0, 0, 0, 0};
+        std_result = std::randomize(sarr, sidx) with {sidx inside {[0 : 3]}; sarr[sidx] == 8'hFF;};
+        `checkd(std_result, 1);
+        `checkd(sarr[sidx], 8'hFF);
+      end
+    end
+
+    // Same rand index, but also reaching a plain non-rand array in the same
+    // expression -- that side must still get the non-rand elementwise treatment,
+    // not be mistaken for part of the std::randomize() call's own rand set.
+    begin
+      bit [7:0] sarr2[4];
+      bit [7:0] other[4];
+      int sidx2;
+      int std_result2;
+      other = '{8'h11, 8'h22, 8'h33, 8'h44};
+      for (int i = 0; i < 20; i++) begin
+        sarr2 = '{0, 0, 0, 0};
+        std_result2 = std::randomize(
+            sarr2, sidx2) with {sidx2 inside {[0 : 3]}; sarr2[sidx2] == other[sidx2];};
+        `checkd(std_result2, 1);
+        `checkd(sarr2[sidx2], other[sidx2]);
+      end
+    end
+
+    begin
+      StdMemberPool mobj;
+      int std_result3;
+      mobj = new;
+      for (int i = 0; i < 20; i++) begin
+        mobj.idx = 0;
+        std_result3 = std::randomize(
+            mobj.idx) with {mobj.idx inside {[0 : 3]}; mobj.used[mobj.idx] == 8'h33;};
+        `checkd(std_result3, 1);
+        `checkd(mobj.idx, 2);
+        `checkd(mobj.used[mobj.idx], 8'h33);
+      end
+    end
+
+    // Bare and this-qualified spellings of the with-clause member index.
+    iw_obj = new;
+    randomize_result = iw_obj.randomize() with { idx inside {[0:3]}; pool[idx] == 8'h33; };
+    `checkd(randomize_result, 1);
+    `checkd(iw_obj.idx, 2);
+    randomize_result = iw_obj.randomize() with { idx inside {[0:3]}; pool[idx] == 8'h00; };
+    `checkd(randomize_result, 0);
+    randomize_result = iw_obj.randomize() with { idx inside {[0:3]}; pool[this.idx] == 8'h00; };
+    `checkd(randomize_result, 0);
+
+    imm_obj = new;
+    randomize_result = imm_obj.randomize() with { k == 2; pool[c + k] == 8'h55; };
+    `checkd(randomize_result, 1);
+    `checkd(imm_obj.k, 2);
+    randomize_result = imm_obj.randomize() with { k == 2; pool[c + k] == 8'hFF; };
+    `checkd(randomize_result, 0);
+
+    hs_obj = new;
+    randomize_result = hs_obj.randomize();
+    `checkd(randomize_result, 1);
+
+    ims_obj = new;
+    randomize_result = ims_obj.randomize();
+    `checkd(randomize_result, 1);
+
+    ims_u_obj = new;
+    randomize_result = ims_u_obj.randomize();
+    `checkd(randomize_result, 0);
+
+    $write("*-* All Finished *-*\n");
+    $finish;
+  end
+endmodule
